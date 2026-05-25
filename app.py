@@ -9,7 +9,7 @@ import gspread
 
 st.set_page_config(layout="wide", page_title="ระบบติดตาม Safety Stock คลังพัสดุ")
 
-st.title("📦 ระบบแจ้งเตือนและติดตามเกณฑ์พัสดุสำรอง (Safety Stock)")
+st.title("📦 ระบบแจ้งเตือนและติดตามเกณฑ์พัรอง (Safety Stock)")
 st.subheader("เปรียบเทียบเกณฑ์อนุมัติประจำปี 2569 กับ ยอดคงคลังปัจจุบัน (MB52)")
 
 # 🔥 ระบุชื่อไฟล์ Google Sheets ที่อยู่บน Google Drive
@@ -182,6 +182,7 @@ if df_safety is not None:
                         
                         st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** สำเร็จ!")
                         st.cache_data.clear() 
+                        st.rerun()  # รีเฟรชหน้าจอเพื่อดึงค่าใหม่ทันที
             else:
                 st.sidebar.warning("⚠️ ไม่พบข้อมูลโครงสร้างตารางพัสดุในไฟล์ที่อัปโหลด")
         except Exception as e:
@@ -200,7 +201,10 @@ if df_safety is not None:
                 worksheet = sh.worksheet(warehouse_option)
                 records = worksheet.get_all_records()
                 if records:
-                    df_mb52_clean = pd.DataFrame(records)
+                    df_test = pd.DataFrame(records)
+                    # 🛠️ จุดป้องกันความปลอดภัย: เช็คว่าในแผ่นงาน Google Sheets มีคอลัมน์ชื่อ 'SAP_Code' จริงไหม
+                    if 'SAP_Code' in df_test.columns:
+                        df_mb52_clean = df_test
             except gspread.exceptions.WorksheetNotFound:
                 df_mb52_clean = None
         except Exception:
@@ -208,7 +212,8 @@ if df_safety is not None:
 
     df_safety[warehouse_option] = df_safety[warehouse_option].fillna(0)
 
-    if df_mb52_clean is not None and not df_mb52_clean.empty:
+    # เงื่อนไขตรวจสอบ: ถ้ามีข้อมูล Google Sheets และโครงสร้างถูกต้องครบถ้วน
+    if df_mb52_clean is not None and not df_mb52_clean.empty and 'SAP_Code' in df_mb52_clean.columns:
         df_safety['SAP_Code_Clean'] = df_safety['SAP_Code'].astype(str).str.replace('-', '').str.strip()
         df_mb52_clean['SAP_Code_Clean'] = df_mb52_clean['SAP_Code'].astype(str).str.replace('-', '').str.strip()
 
@@ -238,14 +243,12 @@ if df_safety is not None:
         styled_df = df_result.style.map(alert_low_stock, subset=['คงเหลือ (ผลต่าง 0021)']).format(format_dict)
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
-        # กรองรายการที่ของขาด (ติดลบ)
         df_shortage = df_result[df_result['คงเหลือ (ผลต่าง 0021)'] < 0]
         shortage_0021 = len(df_shortage)
         
         if shortage_0021 > 0:
             st.error(f"🚨 Status คลัง **{warehouse_option}**: ตรวจพบพัสดุในคลังย่อย 0021 ต่ำกว่าเกณฑ์ความปลอดภัยจำนวน **{shortage_0021}** รายการ!")
             
-            # --- ปุ่มกดสำหรับสั่งยิงไลน์หาผู้บริหารด้วยมือเพื่อความแม่นยำ ---
             st.markdown("### 📱 ระบบส่งรายงานเข้า LINE ผู้บริหาร")
             target_chat_id = st.text_input("กรอก LINE Group ID หรือ User ID ปลายทางที่ต้องการส่งข้อมูล:", value="", help="ระบุไอดีกลุ่มที่ได้จาก Webhook หรือระบบบอต")
             
@@ -253,11 +256,10 @@ if df_safety is not None:
                 if not target_chat_id:
                     st.warning("⚠️ กรุณากรอกรหัส ID ปลายทางก่อนกดส่งครับ")
                 else:
-                    # 🛠️ จุดที่แก้ไข: เปลี่ยนมาใช้ .iterrows() เพื่อเรียกชื่อไทยตรง ๆ ป้องกันปัญหาลำดับคอลัมน์เคลื่อน
                     line_msg = f"🚨 [รายงานพัสดุต่ำกว่าเกณฑ์ความปลอดภัย]\n📊 พื้นที่คลัง: {warehouse_option}\n\n📌 รายการพัสดุวิกฤต:\n"
                     
                     for idx, row in enumerate(df_shortage.iterrows(), 1):
-                        data = row[1]  # ดึงข้อมูลของบรรทัดนั้น ๆ มาใช้งาน
+                        data = row[1]
                         needed = abs(int(data['คงเหลือ (ผลต่าง 0021)'])) 
                         line_msg += f"{idx}. รหัส: {data['รหัสพัสดุ']}\n   {data['ชื่อพัสดุ']}\n   ยอดคลังย่อย: {data['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)']} | เกณฑ์: {data['อนุมัติ safety stock']}\n   ❌ ขาดอีก: {needed}\n"
                         line_msg += "----------------------------------\n"
@@ -272,7 +274,8 @@ if df_safety is not None:
             st.success(f"✅ พัสดุทั้งหมดในคลังย่อย 0021 ของคลัง **{warehouse_option}** อยู่ในระดับที่ปลอดภัยครบถ้วน")
             
     else:
-        st.info(f"📊 ยังไม่มีฐานข้อมูลถาวรของคลัง **{warehouse_option}** ใน Google Sheets (กรุณาเลือกคลังปลายทางด้านซ้ายและอัปโหลดไฟล์รายงานคงเหลือเพื่อตั้งต้นข้อมูล)")
+        # 🛡️ แผ่นงานข้อมูลพังหรือยังไม่มีข้อมูล จะตกลงมาทำงานที่กล่องบล็อกนี้แทนอย่างปลอดภัย ไม่พ่น Error สีแดงตัวใหญ่แล้ว
+        st.info(f"📊 ยังไม่มีฐานข้อมูลถาวรของคลัง **{warehouse_option}** ใน Google Sheets หรือโครงสร้างข้อมูลเดิมไม่สมบูรณ์ (กรุณาเลือกคลังปลายทางด้านซ้ายและอัปโหลดไฟล์รายงานคงเหลือเพื่อตั้งต้นข้อมูลใหม่)")
         
         df_blank = pd.DataFrame()
         df_blank['ลำดับ'] = df_safety['No']
