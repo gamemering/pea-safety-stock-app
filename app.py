@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import os
 import re
-import requests
-import json
 from google.oauth2.service_account import Credentials
 import gspread
 
@@ -58,33 +56,7 @@ def load_safety_stock_from_file(file_path):
 
 df_safety = load_safety_stock_from_file(detected_file)
 
-# --- ฟังก์ชันสำหรับส่งข้อความผ่าน LINE Messaging API ---
-def send_line_message(message_text, target_id):
-    try:
-        url = "https://api.line.me/v2/bot/message/push"
-        token = st.secrets["line_channel_access_token"]
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}"
-        }
-        
-        payload = {
-            "to": target_id,
-            "messages": [
-                {
-                    "type": "text",
-                    "text": message_text
-                }
-            ]
-        }
-        
-        response = requests.post(url, headers=headers, data=json.dumps(payload))
-        return response.status_code
-    except Exception as e:
-        return None
-
-# --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP (ตัวเก่งที่อ่านไฟล์จริงผ่าน) ---
+# --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP (Text Parser) ---
 def parse_mb52_txt(file_content):
     material_data = {}
     current_material = None
@@ -95,6 +67,7 @@ def parse_mb52_txt(file_content):
         if not line:
             continue
             
+        # 🛠️ ซ่อมแซมตรงนี้จุดเดียว: ปอกเครื่องหมาย | ที่หัวแถวออกเพื่อให้โครงสร้างข้อมูลแมตช์กับ Regex และ Token เดิมของคุณ
         if line.startswith('|'):
             line = line[1:].strip()
             
@@ -156,7 +129,7 @@ if df_safety is not None:
         key=f"uploader_{upload_target}"
     )
 
-    # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร + ระบบส่ง LINE อัตโนมัติหลังบันทึกเสร็จ
+    # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร
     if uploaded_mb52 is not None:
         try:
             raw_bytes = uploaded_mb52.getvalue()
@@ -168,7 +141,7 @@ if df_safety is not None:
             df_parsed = parse_mb52_txt(string_data)
             
             if not df_parsed.empty:
-                with St.spinner(f"กำลังอัปเดตฐานข้อมูลถาวรของคลัง {upload_target} ลง Google Sheets..."):
+                with st.spinner(f"กำลังอัปเดตฐานข้อมูลถาวรของคลัง {upload_target} ลง Google Sheets..."):
                     client = get_gspread_client()
                     if client is not None:
                         sh = client.open(GOOGLE_SHEET_NAME)
@@ -182,68 +155,12 @@ if df_safety is not None:
                         data_to_save = [df_parsed.columns.tolist()] + df_parsed.values.tolist()
                         worksheet.update('A1', data_to_save)
                         
-                        st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
+                        st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สมเร็จ!")
                         st.cache_data.clear() 
-                        
-                        # --- 📱 ระบบวิเคราะห์และยิงไลน์กลุ่มอัตโนมัติเบื้องหลังทันที ---
-                        if "line_group_id" in st.secrets:
-                            df_safety_line = df_safety.copy()
-                            df_parsed_line = df_parsed.copy()
-                            
-                            df_safety_line['SAP_Code'] = df_safety_line['SAP_Code'].astype(str).str.strip()
-                            df_parsed_line['SAP_Code'] = df_parsed_line['SAP_Code'].astype(str).str.strip()
-                            
-                            df_merge_auto = pd.merge(df_safety_line, df_parsed_line, on='SAP_Code', how='left')
-                            
-                            df_merge_auto['Qty_0021'] = pd.to_numeric(df_merge_auto['Qty_0021'], errors='coerce').fillna(0)
-                            df_merge_auto[upload_target] = pd.to_numeric(df_merge_auto[upload_target], errors='coerce').fillna(0)
-                            
-                            df_merge_auto['คงเหลือ_0021'] = df_merge_auto['Qty_0021'] - df_merge_auto[upload_target]
-                            df_shortage_auto = df_merge_auto[df_merge_auto['คงเหลือ_0021'] < 0]
-                            
-                            if not df_shortage_auto.empty:
-                                total_shortage = len(df_shortage_auto)
-                                line_msg = f"🚨 [รายงานแจ้งเตือนพัสดุต่ำกว่าเกณฑ์ Safety Stock]\n📊 พื้นที่คลังพัสดุ: {upload_target}\n⚠️ ตรวจพบรายการวิกฤตทั้งหมด: {total_shortage} รายการ\n\n📌 รายการพัสดุวิกฤตและยอดผลต่างที่ขาดคลัง:\n"
-                                
-                                # ควบคุมจำนวนรายการแสดงสูงสุดแค่ 15 รายการ เพื่อป้องกันปัญหาส่งข้อความยาวเกินเกณฑ์ของ LINE
-                                for idx, row in enumerate(df_shortage_auto.iterrows(), 1):
-                                    data = row[1]
-                                    current_0021 = int(data['Qty_0021'])
-                                    limit_stock = int(data[upload_target])
-                                    needed_qty = limit_stock - current_0021
-                                    
-                                    line_msg += f"{idx}. รหัส: {data['SAP_Code']}\n"
-                                    line_msg += f" {data['Description']}\n"
-                                    line_msg += f" ยอดคลังย่อย: {current_0021} | เกณฑ์อนุมัติ: {limit_stock}\n"
-                                    line_msg += f" ❌ ผลต่าง (ขาดอีก): {needed_qty}\n"
-                                    line_msg += "----------------------------------\n"
-                                    
-                                    if idx >= 15:
-                                        line_msg += f"🔺 และยังมีรายการอื่น ๆ ที่ต่ำกว่าเกณฑ์อีก {total_shortage - 15} รายการ ตรวจสอบเพิ่มเติมได้บนระบบหน้าเว็บครับ\n"
-                                        break
-                                        
-                                status_code = send_line_message(line_msg, st.secrets["line_group_id"])
-                                if status_code == 200:
-                                    st.sidebar.success("📱 ส่งรายงานผลต่างเข้า LINE สำเร็จ!")
-                                else:
-                                    st.sidebar.warning(f"⚠️ บันทึกสำเร็จ แต่ไลน์ไม่ส่ง (LINE API Code: {status_code})")
             else:
                 st.sidebar.warning("⚠️ ไม่พบข้อมูลพัสดุในไฟล์ที่อัปโหลด")
         except Exception as e:
             st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูลลงแผ่นงาน: {e}")
-
-    # --- 🧪 เครื่องมือทดสอบระบบ LINE ด่วน (เอาออกได้ภายหลัง) ---
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🧪 เครื่องมือทดสอบระบบ LINE")
-    if st.sidebar.button("⚡ ยิงข้อความทดสอบเข้า LINE ทันที"):
-        if "line_group_id" in st.secrets:
-            test_code = send_line_message("🎯 สัญญาณชีพปกติ! ระบบแจ้งเตือน Safety Stock เชื่อมต่อกับ LINE กลุ่มสำเร็จแล้ว!", st.secrets["line_group_id"])
-            if test_code == 200:
-                st.sidebar.success("✅ ไลน์เด้งแล้ว! ระบบเครือข่ายทำงานปกติ 100%")
-            else:
-                st.sidebar.error(f"❌ ไลน์ไม่เด้ง! รหัสความผิดพลาดจาก LINE คือ Code: {test_code}")
-        else:
-            st.sidebar.error("❌ ไม่พบ line_group_id ในหน้าต่าง Secrets")
 
 
     # --- ส่วนที่ 4: การดึงดาต้าจาก Google Sheets มาคำนวณโชว์ผล ---
