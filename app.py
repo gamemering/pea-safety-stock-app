@@ -56,7 +56,7 @@ def load_safety_stock_from_file(file_path):
 
 df_safety = load_safety_stock_from_file(detected_file)
 
-# --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP (ปรับปรุงเพื่อรองรับรูปแบบไฟล์จริง) ---
+# --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP (Text Parser) ---
 def parse_mb52_txt(file_content):
     material_data = {}
     lines = file_content.split('\n')
@@ -66,22 +66,17 @@ def parse_mb52_txt(file_content):
         if not line:
             continue
             
-        # แยกข้อมูลออกเป็นก้อนๆ ด้วยช่องว่าง
+        # ใช้ระบบแบ่งก้อนคำด้วยช่องว่างตามโครงสร้างไฟล์จริงจาก SAP
         tokens = line.split()
-        
-        # ตรวจสอบโครงสร้างบรรทัดข้อมูลพัสดุจริง (ก้อนแรกต้องเป็นตัวเลขรหัสพัสดุและมีความยาวคำเพียงพอ)
         if len(tokens) >= 4:
             raw_code = tokens[0].replace('-', '').strip()
-            
             if re.match(r'^\d+$', raw_code):
-                sloc_id = tokens[1].strip()     # คลังย่อย SLoc (ก้อนที่ 2)
-                qty_str = tokens[3].replace(',', '').strip()  # ยอดคงคลัง Unrestricted (ก้อนที่ 4)
-                
+                sloc_id = tokens[1].strip()
+                qty_str = tokens[3].replace(',', '').strip()
                 try:
                     qty = float(qty_str)
                     if raw_code not in material_data:
                         material_data[raw_code] = {'Total_Qty': 0.0, 'Qty_0021': 0.0}
-                        
                     material_data[raw_code]['Total_Qty'] += qty
                     if sloc_id == '0021':
                         material_data[raw_code]['Qty_0021'] += qty
@@ -171,6 +166,13 @@ if df_safety is not None:
                 records = worksheet.get_all_records()
                 if records:
                     df_mb52_clean = pd.DataFrame(records)
+                    
+                    # 🛠️ จุดแก้ไขสำคัญ: ซ่อมแซมหัวตารางที่ว่างเปล่าจาก Google Sheets ให้กลับมาชื่อ 'SAP_Code'
+                    if "" in df_mb52_clean.columns:
+                        df_mb52_clean = df_mb52_clean.rename(columns={"": "SAP_Code"})
+                    elif "Unnamed: 0" in df_mb52_clean.columns:
+                        df_mb52_clean = df_mb52_clean.rename(columns={"Unnamed: 0": "SAP_Code"})
+                        
             except gspread.exceptions.WorksheetNotFound:
                 df_mb52_clean = None
         except Exception:
@@ -179,8 +181,10 @@ if df_safety is not None:
     # เคลียร์ปัญหาเกณฑ์พัสดุใน GitHub มีค่าว่างเปล่า (NaN) ป้องกันการพังในทุก ๆ จุดคำนวณ
     df_safety[warehouse_option] = df_safety[warehouse_option].fillna(0)
 
-    if df_mb52_clean is not None and not df_mb52_clean.empty and 'SAP_Code' in df_mb52_clean.columns:
-        # ล้างขีดและเว้นวรรคออกเฉพาะตอนจับคู่เพื่อป้องกันการชนกันไม่เจอ
+    # ตรวจสอบว่ามีข้อมูลและหัวคอลัมน์พร้อมชนตาราง
+    if df_mb52_clean is not None and not df_mb52_clean.empty and "SAP_Code" in df_mb52_clean.columns:
+        
+        # ปรับแต่งรหัสพัสดุให้สะอาด (ถอดขีดออกชั่วคราว) เพื่อป้องกันปัญหาจับคู่ไม่เจอ
         df_safety['SAP_Code_Match'] = df_safety['SAP_Code'].astype(str).str.replace('-', '').str.strip()
         df_mb52_clean['SAP_Code_Match'] = df_mb52_clean['SAP_Code'].astype(str).str.replace('-', '').str.strip()
 
@@ -218,7 +222,7 @@ if df_safety is not None:
             st.success(f"✅ พัสดุทั้งหมดในคลังย่อย 0021 ของคลัง **{warehouse_option}** อยู่ในระดับที่ปลอดภัยครบถ้วน")
             
     else:
-        st.info(f"📊 ยังไม่มีฐานข้อมูลถาวรของคลัง **{warehouse_option}** ใน Google Sheets หรือโครงสร้างข้อมูลเดิมในชีตไม่สมบูรณ์ (กรุณาเลือกคลังปลายทางด้านซ้ายและอัปโหลดไฟล์ MB52 เพื่อตั้งต้นข้อมูลใหม่)")
+        st.info(f"📊 ยังไม่มีฐานข้อมูลถาวรของคลัง **{warehouse_option}** ใน Google Sheets หรือโครงสร้างคอลัมน์ไม่สมบูรณ์ (กรุณาเลือกคลังปลายทางด้านซ้ายและอัปโหลดไฟล์เพื่อรีเซ็ตข้อมูล)")
         
         df_blank = pd.DataFrame()
         df_blank['ลำดับ'] = df_safety['No']
