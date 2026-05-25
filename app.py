@@ -2,13 +2,33 @@ import streamlit as st
 import pandas as pd
 import os
 import re
+from google.oauth2.service_account import Credentials
+import gspread
 
 st.set_page_config(layout="wide", page_title="ระบบติดตาม Safety Stock คลังพัสดุ")
 
 st.title("📦 ระบบแจ้งเตือนและติดตามเกณฑ์พัสดุสำรอง (Safety Stock)")
 st.subheader("เปรียบเทียบเกณฑ์อนุมัติประจำปี 2569 กับ ยอดคงคลังปัจจุบัน (MB52)")
 
-# --- ส่วนที่ 1: ค้นหาไฟล์เกณฑ์ Safety Stock อัตโนมัติในโฟลเดอร์ ---
+# 🔥 ตรงนี้สำคัญมาก: เปลี่ยนคำว่า pea_safety_stock_db ให้เป็นชื่อไฟล์ Google Sheets ของคุณจริง ๆ
+GOOGLE_SHEET_NAME = "pea_safety_stock_db"
+
+# --- ฟังก์ชันสำหรับเชื่อมต่อ Google Sheets ผ่านคีย์ลับใน Secrets ---
+def get_gspread_client():
+    try:
+        scope = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        secret_creds = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(secret_creds, scopes=scope)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        st.error(f"❌ ระบบความปลอดภัยปฏิเสธการเชื่อมต่อ (Secrets Error): {e}")
+        return None
+
+# --- ส่วนที่ 1: ค้นหาไฟล์เกณฑ์ Safety Stock อัตโนมัติในโฟลเดอร์ GitHub ---
 def find_safety_stock_file():
     for file in os.listdir('.'):
         if file.endswith('.txt') or file.endswith('.csv'):
@@ -39,10 +59,8 @@ df_safety = load_safety_stock_from_file(detected_file)
 
 # --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP (Text Parser) ---
 def parse_mb52_txt(file_content):
-    """ฟังก์ชันแกะโครงสร้างข้อความ MB52 โดยแยกเก็บทั้งยอดรวมทุก SLoc และยอดเฉพาะ SLoc 0021"""
     material_data = {}
     current_material = None
-    
     lines = file_content.split('\n')
     
     for line in lines:
@@ -50,7 +68,6 @@ def parse_mb52_txt(file_content):
         if not line:
             continue
             
-        # 1. ตรวจจับรหัสพัสดุ (เช่น 1-00-001-0001)
         match_mat = re.match(r'^(\d-\d{2}-\d{3}-\d{4})', line)
         if match_mat:
             raw_code = match_mat.group(1)
@@ -59,7 +76,6 @@ def parse_mb52_txt(file_content):
                 material_data[current_material] = {'Total_Qty': 0.0, 'Qty_0021': 0.0}
             continue
             
-        # 2. ตรวจจับบรรทัดจำนวนพัสดุ (เช็คจากหน่วยนับมาตรฐาน)
         tokens = line.split()
         if len(tokens) >= 4:
             if tokens[3] in ['EA', 'KG', 'M', 'PAC', 'L']:
@@ -82,16 +98,10 @@ def parse_mb52_txt(file_content):
     return df_parsed
 
 
-# --- ส่วนที่ 3: ระบบหน่วยความจำแยกฐานข้อมูล (Session State) ---
-if 'warehouse_db' not in st.session_state:
-    st.session_state['warehouse_db'] = {}
-
-
 # เริ่มรันหน้าเว็บเมื่อไฟล์เกณฑ์พัสดุพร้อมใช้งาน
 if df_safety is not None:
     st.sidebar.success(f"📂 ตรวจพบไฟล์เกณฑ์อัตโนมัติ: `{detected_file}`")
     
-    # ⚙️ การตั้งค่าเลือกคลังหลักเพื่อดูรายงาน
     st.sidebar.header("⚙️ เลือกคลังที่ต้องการตรวจสอบ")
     all_columns = df_safety.columns.tolist()
     warehouse_options = [col for col in all_columns if col not in ['No', 'Type', 'SAP_Code', 'Description', 'Unit', 'Total_N3']]
@@ -102,9 +112,8 @@ if df_safety is not None:
         help="เปลี่ยนตรงนี้เพื่อดูสรุปยอดและผลต่างของแต่ละคลัง"
     )
 
-    # 📥 โซนอัปโหลดไฟล์แยกตามคลัง
     st.sidebar.markdown("---")
-    st.sidebar.subheader("📥 อัปเดตยอดคลังเข้าฐานข้อมูล")
+    st.sidebar.subheader("📥 อัปเดตยอดคลังเข้าคลาวด์ถาวร")
     
     upload_target = st.sidebar.selectbox(
         "เลือกคลังปลายทางที่จะบันทึกไฟล์นี้:",
@@ -117,6 +126,7 @@ if df_safety is not None:
         key=f"uploader_{upload_target}"
     )
 
+    # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร
     if uploaded_mb52 is not None:
         try:
             raw_bytes = uploaded_mb52.getvalue()
@@ -128,18 +138,42 @@ if df_safety is not None:
             df_parsed = parse_mb52_txt(string_data)
             
             if not df_parsed.empty:
-                st.session_state['warehouse_db'][upload_target] = df_parsed
-                st.sidebar.success(f"💾 บันทึกยอดจริงเข้าสู่คลัง **{upload_target}** เรียบร้อย!")
+                with st.spinner(f"กำลังอัปเดตฐานข้อมูลถาวรของคลัง {upload_target} ลง Google Sheets..."):
+                    client = get_gspread_client()
+                    if client is not None:
+                        sh = client.open(GOOGLE_SHEET_NAME)
+                        
+                        try:
+                            worksheet = sh.worksheet(upload_target)
+                        except gspread.exceptions.WorksheetNotFound:
+                            worksheet = sh.add_worksheet(title=upload_target, rows="1000", cols="5")
+                        
+                        worksheet.clear()
+                        data_to_save = [df_parsed.columns.tolist()] + df_parsed.values.tolist()
+                        worksheet.update('A1', data_to_save)
+                        
+                        st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
+                        st.cache_data.clear() 
             else:
                 st.sidebar.warning("⚠️ ไม่พบข้อมูลพัสดุในไฟล์ที่อัปโหลด")
         except Exception as e:
-            st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูล: {e}")
+            st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูลลงแผ่นงาน: {e}")
 
 
-    # --- ส่วนที่ 4: การประมวลผลจัดตารางแสดงผลตามเงื่อนไขที่กำหนด ---
+    # --- ส่วนที่ 4: การดึงดาต้าจาก Google Sheets มาคำนวณโชว์ผล ---
     st.write(f"📊 กำลังแสดงยอดเปรียบเทียบคลัง: **{warehouse_option}**")
     
-    df_mb52_clean = st.session_state['warehouse_db'].get(warehouse_option, None)
+    df_mb52_clean = None
+    client = get_gspread_client()
+    if client is not None:
+        try:
+            sh = client.open(GOOGLE_SHEET_NAME)
+            worksheet = sh.worksheet(warehouse_option)
+            records = worksheet.get_all_records()
+            if records:
+                df_mb52_clean = pd.DataFrame(records)
+        except Exception:
+            df_mb52_clean = None
 
     if df_mb52_clean is not None and not df_mb52_clean.empty:
         df_safety['SAP_Code'] = df_safety['SAP_Code'].astype(str).str.strip()
@@ -149,27 +183,18 @@ if df_safety is not None:
         df_merge['Actual_Qty'] = df_merge['Actual_Qty'].fillna(0)
         df_merge['Qty_0021'] = df_merge['Qty_0021'].fillna(0)
 
-        # ขึ้นโครงสร้างตาราง 7 คอลัมน์ สลับตำแหน่ง 5-6 และย้ายยอดรวมมาคอลัมน์ที่ 4 เรียบร้อย
         df_result = pd.DataFrame()
         df_result['ลำดับ'] = df_merge['No']
         df_result['รหัสพัสดุ'] = df_merge['SAP_Code']
         df_result['ชื่อพัสดุ'] = df_merge['Description']
-        
-        # คอลัมน์ที่ 4: จำนวนในคลังทั้งหมด
         df_result['จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)'] = df_merge['Actual_Qty'].round(0).astype(int)
-        
-        # คอลัมน์ที่ 5 และ 6: สลับสับเปลี่ยนตำแหน่งตามคำสั่งล่าสุด
         df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] = df_merge['Qty_0021'].round(0).astype(int)
         df_result['อนุมัติ safety stock'] = df_merge[warehouse_option].astype(int)
-        
-        # คอลัมน์ที่ 7: คงเหลือผลต่าง 0021 (สูตร: ยอด 0021 - เกณฑ์อนุมัติ)
         df_result['คงเหลือ (ผลต่าง 0021)'] = df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] - df_result['อนุมัติ safety stock']
 
-        # ฟังก์ชันไฮไลต์สีแดงเมื่อยอดคลังย่อย 0021 ต่ำกว่าเกณฑ์อนุมัติ (ค่าติดลบ < 0)
         def alert_low_stock(val):
             return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if val < 0 else ''
 
-        # รูปแบบฟอร์แมตคอมม่าหลักพันจำนวนเต็ม
         format_dict = {
             'จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)': '{:,}',
             'จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)': '{:,}',
@@ -177,20 +202,18 @@ if df_safety is not None:
             'คงเหลือ (ผลต่าง 0021)': '{:,}'
         }
 
-        # ย้อมสีแดงเตือนในช่องผลต่างของคลังย่อย 0021
         styled_df = df_result.style.map(alert_low_stock, subset=['คงเหลือ (ผลต่าง 0021)']).format(format_dict)
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
-        # นับจำนวนรายการวิกฤตของคลังย่อย 0021
         shortage_0021 = len(df_result[df_result['คงเหลือ (ผลต่าง 0021)'] < 0])
         
         if shortage_0021 > 0:
-            st.error(f"🚨 สถานะคลัง **{warehouse_option}**: ตรวจพบพัสดุในคลังย่อย 0021 ต่ำกว่าเกณฑ์ความปลอดภัยจำนวน **{shortage_0021}** รายการ! กรุณาตรวจสอบแถวสีแดงเพื่อเตรียมใบจัดซื้อ (PR)")
+            st.error(f"🚨 สถานะคลัง **{warehouse_option}**: ตรวจพบพัสดุในคลังย่อย 0021 ต่ำกว่าเกณฑ์ความปลอดภัยจำนวน **{shortage_0021}** รายการ!")
         else:
             st.success(f"✅ พัสดุทั้งหมดในคลังย่อย 0021 ของคลัง **{warehouse_option}** อยู่ในระดับที่ปลอดภัยครบถ้วน")
             
     else:
-        st.info(f"📊 กรุณาลากไฟล์รายงานยอดคงคลังจาก SAP มาวางที่ช่องด้านซ้ายมือเพื่อคำนวณยอดส่วนต่าง")
+        st.info(f"📊 ยังไม่มีฐานข้อมูลถาวรของคลัง **{warehouse_option}** ใน Google Sheets (กรุณาเลือกคลังปลายทางด้านซ้ายและอัปโหลดไฟล์ MB52 เพื่อตั้งต้นข้อมูล)")
         
         df_blank = pd.DataFrame()
         df_blank['ลำดับ'] = df_safety['No']
@@ -198,8 +221,6 @@ if df_safety is not None:
         df_blank['ชื่อพัสดุ'] = df_safety['Description']
         df_blank['หน่วยนับ'] = df_safety['Unit']
         df_blank['อนุมัติ safety stock'] = df_safety[warehouse_option].astype(int)
-        
-        # แก้ไข Syntax Error โครงสร้างจุดนี้ให้คลีนสมบูรณ์
         st.dataframe(df_blank.style.format({'อนุมัติ safety stock': '{:,}'}), use_container_width=True, hide_index=True)
 
 else:
