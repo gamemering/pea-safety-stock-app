@@ -56,39 +56,51 @@ def load_safety_stock_from_file(file_path):
 
 df_safety = load_safety_stock_from_file(detected_file)
 
-# --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP (Text Parser) ---
-# 🛠️ ปรับปรุงแก้ไขจุดนี้จุดเดียว: เพื่อให้อ่านโครงสร้างก้อนคำจากไฟล์ SAP จริงได้ถูกต้อง
+# --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP + 🛠️ ฝังตัวดักจับ Debug ---
 def parse_mb52_txt(file_content):
     material_data = {}
     lines = file_content.split('\n')
     
+    # 🔍 สร้างกล่องดักจับ Log ชั่วคราวไปแสดงผลบนหน้าเว็บ
+    debug_logs = []
+    lines_checked = 0
+    
     for line in lines:
-        line = line.strip()
-        if not line:
+        line_clean = line.strip()
+        if not line_clean:
             continue
             
-        # แยกข้อมูลออกเป็นก้อนๆ ด้วยช่องว่างตามโครงสร้างไฟล์จริง
-        tokens = line.split()
+        tokens = line_clean.split()
         
-        # บรรทัดข้อมูลพัสดุจริง ก้อนแรกสุดต้องเป็นตัวเลขรหัสพัสดุ (เช่น 10003254) และมีจำนวนก้อนคำเพียงพอ
+        # เก็บ Log เฉพาะ 10 บรรทัดแรกที่มีข้อมูลมาวิเคราะห์
+        if lines_checked < 10:
+            debug_logs.append(f"บรรทัดที่ {lines_checked+1} แยกได้ {len(tokens)} ก้อน -> คำแรก: '{tokens[0] if len(tokens)>0 else 'ไม่มี'}'")
+            lines_checked += 1
+            
         if len(tokens) >= 4:
             raw_code = tokens[0].replace('-', '').strip()
             
-            # ดักจับว่าก้อนแรกต้องเป็นตัวเลขรหัสพัสดุจาก SAP เท่านั้น
             if re.match(r'^\d+$', raw_code):
-                sloc_id = tokens[1].strip()                  # คลังย่อย SLoc อยู่ก้อนที่ 2
-                qty_str = tokens[3].replace(',', '').strip() # ยอดคงคลัง Unrestricted อยู่ก้อนที่ 4
-                
+                sloc_id = tokens[1].strip()
+                qty_str = tokens[3].replace(',', '').strip()
                 try:
                     qty = float(qty_str)
                     if raw_code not in material_data:
                         material_data[raw_code] = {'Total_Qty': 0.0, 'Qty_0021': 0.0}
-                        
                     material_data[raw_code]['Total_Qty'] += qty
                     if sloc_id == '0021':
                         material_data[raw_code]['Qty_0021'] += qty
                 except ValueError:
                     pass
+                    
+    # พ่นค่า Log ออกมาประจานหน้าเว็บชั่วคราว
+    st.write("---")
+    st.subheader("⚙️ รายงานการวิเคราะห์จากตัว Debug (ฝังชั่วคราว)")
+    st.info(f"ระบบอ่านข้อมูลพัสดุสำเร็จเข้าตารางได้ทั้งหมด: {len(material_data)} รายการ")
+    with st.expander("คลิกเพื่อดูโครงสร้างก้อนคำ 10 บรรทัดแรกที่โค้ดอ่านได้จริง"):
+        for log in debug_logs:
+            st.text(log)
+    st.write("---")
                     
     parsed_list = []
     for k, v in material_data.items():
@@ -102,132 +114,4 @@ def parse_mb52_txt(file_content):
 if df_safety is not None:
     st.sidebar.success(f"📂 ตรวจพบไฟล์เกณฑ์อัตโนมัติ: `{detected_file}`")
     
-    st.sidebar.header("⚙️ เลือกคลังที่ต้องการตรวจสอบ")
-    all_columns = df_safety.columns.tolist()
-    warehouse_options = [col for col in all_columns if col not in ['No', 'Type', 'SAP_Code', 'Description', 'Unit', 'Total_N3']]
-    
-    warehouse_option = st.sidebar.selectbox(
-        "เลือกพื้นที่คลังพัสดุเพื่อดูตาราง:",
-        options=warehouse_options,
-        help="เปลี่ยนตรงนี้เพื่อดูสรุปยอดและผลต่างของแต่ละคลัง"
-    )
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📥 อัปเดตยอดคลังเข้าคลาวด์ถาวร")
-    
-    upload_target = st.sidebar.selectbox(
-        "เลือกคลังปลายทางที่จะบันทึกไฟล์นี้:",
-        options=warehouse_options,
-        key="upload_target_select"
-    )
-    
-    uploaded_mb52 = st.sidebar.file_uploader(
-        f"ลากวางไฟล์ MB52.txt ของคลัง [{upload_target}] ที่นี่", 
-        key=f"uploader_{upload_target}"
-    )
-
-    # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร
-    if uploaded_mb52 is not None:
-        try:
-            raw_bytes = uploaded_mb52.getvalue()
-            try:
-                string_data = raw_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                string_data = raw_bytes.decode("cp874", errors="ignore")
-                
-            df_parsed = parse_mb52_txt(string_data)
-            
-            if not df_parsed.empty:
-                with st.spinner(f"กำลังอัปเดตฐานข้อมูลถาวรของคลัง {upload_target} ลง Google Sheets..."):
-                    client = get_gspread_client()
-                    if client is not None:
-                        sh = client.open(GOOGLE_SHEET_NAME)
-                        
-                        try:
-                            worksheet = sh.worksheet(upload_target)
-                        except gspread.exceptions.WorksheetNotFound:
-                            worksheet = sh.add_worksheet(title=upload_target, rows="1000", cols="5")
-                        
-                        worksheet.clear()
-                        data_to_save = [df_parsed.columns.tolist()] + df_parsed.values.tolist()
-                        worksheet.update('A1', data_to_save)
-                        
-                        st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
-                        st.cache_data.clear() 
-            else:
-                st.sidebar.warning("⚠️ ไม่พบข้อมูลพัสดุในไฟล์ที่อัปโหลด")
-        except Exception as e:
-            st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูลลงแผ่นงาน: {e}")
-
-
-    # --- ส่วนที่ 4: การดึงดาต้าจาก Google Sheets มาคำนวณโชว์ผล ---
-    st.write(f"📊 กำลังแสดงยอดเปรียบเทียบคลัง: **{warehouse_option}**")
-    
-    df_mb52_clean = None
-    client = get_gspread_client()
-    if client is not None:
-        try:
-            sh = client.open(GOOGLE_SHEET_NAME)
-            try:
-                worksheet = sh.worksheet(warehouse_option)
-                records = worksheet.get_all_records()
-                if records:
-                    df_mb52_clean = pd.DataFrame(records)
-            except gspread.exceptions.WorksheetNotFound:
-                df_mb52_clean = None
-        except Exception:
-            df_mb52_clean = None
-
-    # เคลียร์ปัญหาเกณฑ์พัสดุใน GitHub มีค่าว่างเปล่า (NaN) ป้องกันการพังในทุก ๆ จุดคำนวณ
-    df_safety[warehouse_option] = df_safety[warehouse_option].fillna(0)
-
-    if df_mb52_clean is not None and not df_mb52_clean.empty:
-        df_safety['SAP_Code'] = df_safety['SAP_Code'].astype(str).str.strip()
-        df_mb52_clean['SAP_Code'] = df_mb52_clean['SAP_Code'].astype(str).str.strip()
-
-        df_merge = pd.merge(df_safety, df_mb52_clean, on='SAP_Code', how='left')
-        df_merge['Actual_Qty'] = df_merge['Actual_Qty'].fillna(0)
-        df_merge['Qty_0021'] = df_merge['Qty_0021'].fillna(0)
-
-        df_result = pd.DataFrame()
-        df_result['ลำดับ'] = df_merge['No']
-        df_result['รหัสพัสดุ'] = df_merge['SAP_Code']
-        df_result['ชื่อพัสดุ'] = df_merge['Description']
-        df_result['จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)'] = df_merge['Actual_Qty'].round(0).astype(int)
-        df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] = df_merge['Qty_0021'].round(0).astype(int)
-        df_result['อนุมัติ safety stock'] = df_merge[warehouse_option].astype(int)
-        df_result['คงเหลือ (ผลต่าง 0021)'] = df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] - df_result['อนุมัติ safety stock']
-
-        def alert_low_stock(val):
-            return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if val < 0 else ''
-
-        format_dict = {
-            'จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)': '{:,}',
-            'จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)': '{:,}',
-            'อนุมัติ safety stock': '{:,}',
-            'คงเหลือ (ผลต่าง 0021)': '{:,}'
-        }
-
-        styled_df = df_result.style.map(alert_low_stock, subset=['คงเหลือ (ผลต่าง 0021)']).format(format_dict)
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
-        
-        shortage_0021 = len(df_result[df_result['คงเหลือ (ผลต่าง 0021)'] < 0])
-        
-        if shortage_0021 > 0:
-            st.error(f"🚨 สถานะคลัง **{warehouse_option}**: ตรวจพบพัสดุในคลังย่อย 0021 ต่ำกว่าเกณฑ์ความปลอดภัยจำนวน **{shortage_0021}** รายการ!")
-        else:
-            st.success(f"✅ พัสดุทั้งหมดในคลังย่อย 0021 ของคลัง **{warehouse_option}** อยู่ในระดับที่ปลอดภัยครบถ้วน")
-            
-    else:
-        st.info(f"📊 ยังไม่มีฐานข้อมูลถาวรของคลัง **{warehouse_option}** ใน Google Sheets (กรุณาเลือกคลังปลายทางด้านซ้ายและอัปโหลดไฟล์ MB52 เพื่อตั้งต้นข้อมูล)")
-        
-        df_blank = pd.DataFrame()
-        df_blank['ลำดับ'] = df_safety['No']
-        df_blank['รหัสพัสดุ'] = df_safety['SAP_Code']
-        df_blank['ชื่อพัสดุ'] = df_safety['Description']
-        df_blank['หน่วยนับ'] = df_safety['Unit']
-        df_blank['อนุมัติ safety stock'] = df_safety[warehouse_option].fillna(0).astype(int)
-        st.dataframe(df_blank.style.format({'อนุมัติ safety stock': '{:,}'}), use_container_width=True, hide_index=True)
-
-else:
-    st.error("❌ ไม่พบไฟล์ฐานข้อมูลเกณฑ์พัสดุ (Safety Stock) ในระบบ")
+    st.
