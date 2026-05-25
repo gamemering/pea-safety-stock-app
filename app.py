@@ -74,9 +74,8 @@ def parse_mb52_txt(file_content):
 
 
 # --- ส่วนที่ 3: ระบบหน่วยความจำแยกฐานข้อมูล (Session State) ---
-# สร้างคลังข้อมูลจำลอง 13 คลังไว้ในระบบหากยังไม่มี
 if 'warehouse_db' not in st.session_state:
-    st.session_state['warehouse_db'] = {}  # โครงสร้างเก็บข้อมูลแบบ {'C010': df, 'C020': df, ...}
+    st.session_state['warehouse_db'] = {}
 
 
 # เริ่มรันหน้าเว็บเมื่อไฟล์เกณฑ์พัสดุพร้อมใช้งาน
@@ -98,7 +97,6 @@ if df_safety is not None:
     st.sidebar.markdown("---")
     st.sidebar.subheader("📥 อัปเดตยอดคลังเข้าฐานข้อมูล")
     
-    # ดรอปดาวน์เลือกก่อนว่าจะเอายอดไฟล์ txt นี้ เข้าไปเก็บไว้ที่คลังรหัสไหน
     upload_target = st.sidebar.selectbox(
         "เลือกคลังปลายทางที่จะบันทึกไฟล์นี้:",
         options=warehouse_options,
@@ -107,10 +105,9 @@ if df_safety is not None:
     
     uploaded_mb52 = st.sidebar.file_uploader(
         f"ลากวางไฟล์ MB52.txt ของคลัง [{upload_target}] ที่นี่", 
-        key=f"uploader_{upload_target}"  # เปลี่ยน key อัตโนมัติตามคลังที่เลือกเพื่อป้องกันตัวอัปโหลดเอ๋อ
+        key=f"uploader_{upload_target}"
     )
 
-    # บันทึกข้อมูลลงฐานข้อมูลแยกคลังตามที่ระบุ
     if uploaded_mb52 is not None:
         try:
             raw_bytes = uploaded_mb52.getvalue()
@@ -119,11 +116,9 @@ if df_safety is not None:
             except UnicodeDecodeError:
                 string_data = raw_bytes.decode("cp874", errors="ignore")
                 
-            # แปลงไฟล์ txt ออกมาเป็นตารางสรุปยอดจริง
             df_parsed = parse_mb52_txt(string_data)
             
             if not df_parsed.empty:
-                # บันทึกเข้าสู่ฐานข้อมูลประหลักประจำคลังนั้นๆ ในเซสชัน
                 st.session_state['warehouse_db'][upload_target] = df_parsed
                 st.sidebar.success(f"💾 บันทึกยอดจริงเข้าสู่คลัง **{upload_target}** เรียบร้อย! (พบ {len(df_parsed)} รายการ)")
             else:
@@ -135,42 +130,47 @@ if df_safety is not None:
     # --- ส่วนที่ 4: การประมวลผลดึงข้อมูลตามคลังที่เลือกมาแสดงผล ---
     st.write(f"📊 กำลังแสดงยอดเปรียบเทียบคลัง: **{warehouse_option}**")
     
-    # ดึงฐานข้อมูลเฉพาะของคลังที่กำลังเลือกดูอยู่ปัจจุบัน
     df_mb52_clean = st.session_state['warehouse_db'].get(warehouse_option, None)
 
     if df_mb52_clean is not None and not df_mb52_clean.empty:
         df_safety['SAP_Code'] = df_safety['SAP_Code'].astype(str).str.strip()
         df_mb52_clean['SAP_Code'] = df_mb52_clean['SAP_Code'].astype(str).str.strip()
 
-        # นำเกณฑ์มาชนกับยอดคลังจริงเจาะจงเฉพาะคลังนั้นๆ
         df_merge = pd.merge(df_safety, df_mb52_clean, on='SAP_Code', how='left')
         df_merge['Actual_Qty'] = df_merge['Actual_Qty'].fillna(0)
 
-        # จัดโครงสร้างตาราง 7 คอลัมน์ตามมาตรฐาน
+        # จัดโครงสร้างตาราง 7 คอลัมน์
         df_result = pd.DataFrame()
         df_result['ลำดับ'] = df_merge['No']
         df_result['รหัสพัสดุ'] = df_merge['SAP_Code']
         df_result['ชื่อพัสดุ'] = df_merge['Description']
-        df_result['อนุมัติ safety stock'] = df_merge[warehouse_option]
-        df_result['จำนวนอุปกรณ์ในคลัง'] = df_merge['Actual_Qty']
         
-        # คำนวณคงเหลือ (ผลต่าง)
+        # ปรับชนิดข้อมูลตัวเลขจำนวนชิ้นให้เป็น Integer (เลขจำนวนเต็ม) เพื่อตัดทศนิยมออก
+        df_result['อนุมัติ safety stock'] = df_merge[warehouse_option].astype(int)
+        df_result['จำนวนอุปกรณ์ในคลัง'] = df_merge['Actual_Qty'].round(0).astype(int)
         df_result['คงเหลือ (ผลต่าง)'] = df_result['จำนวนอุปกรณ์ในคลัง'] - df_result['อนุมัติ safety stock']
         
-        # คำนวณเปอร์เซ็นต์
+        # เปอร์เซ็นต์เก็บทศนิยมไว้ 2 ตำแหน่งตามมาตรฐานการวิเคราะห์ แต่ถ้าค่าเป็น .00 ระบบจะแสดงผลสวยงาม
         df_result['เปอร์เซ็นต์ (%)'] = df_result.apply(
             lambda r: round((r['คงเหลือ (ผลต่าง)'] / r['อนุมัติ safety stock'] * 100), 2) if r['อนุมัติ safety stock'] > 0 else 0.0, 
             axis=1
         )
 
+        # ฟังก์ชันกำหนดสีไฮไลต์ (ติดลบสีแดง)
         def alert_low_stock(val):
             return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if val < 0 else ''
 
-        # แสดงตารางพร้อมย้อมสีแถวที่ของขาด
-        styled_df = df_result.style.map(alert_low_stock, subset=['คงเหลือ (ผลต่าง)'])
+        # จัดฟอร์แมตการแสดงผลตาราง: ใส่เครื่องหมายจุลภาคคั่นหลักพัน (, ) และตัดทศนิยมตัวเลขจำนวนชิ้นออก
+        format_dict = {
+            'อนุมัติ safety stock': '{:,}',
+            'จำนวนอุปกรณ์ในคลัง': '{:,}',
+            'คงเหลือ (ผลต่าง)': '{:,}',
+            'เปอร์เซ็นต์ (%)': '{:,.2f}%'
+        }
+
+        styled_df = df_result.style.map(alert_low_stock, subset=['คงเหลือ (ผลต่าง)']).format(format_dict)
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
-        # แดชบอร์ดสรุปแจ้งเตือน
         shortage_items = df_result[df_result['คงเหลือ (ผลต่าง)'] < 0]
         if not shortage_items.empty:
             st.error(f"🚨 คลัง **{warehouse_option}** มีพัสดุต่ำกว่าเกณฑ์ความปลอดภัยจำนวน **{len(shortage_items)}** รายการ! กรุณาเปิดใบ PR ด่วน")
@@ -178,9 +178,17 @@ if df_safety is not None:
             st.success(f"✅ พัสดุทั้งหมดในคลัง **{warehouse_option}** อยู่ในระดับที่ปลอดภัยครบถ้วน")
             
     else:
-        # กรณีที่เลือกคลังนั้นแล้วแต่ยังไม่มีการอัปโหลดไฟล์เข้ามา
         st.info(f"ℹ️ ยังไม่มีการอัปเดตข้อมูลยอดคงคลังจริงของคลัง **{warehouse_option}** เข้ามาในระบบ (ตารางด้านล่างแสดงเฉพาะเกณฑ์ที่ตั้งไว้)")
-        st.dataframe(df_safety[['No', 'SAP_Code', 'Description', 'Unit', warehouse_option]], use_container_width=True, hide_index=True)
+        
+        # สำหรับตารางตัวอย่างเปล่า ปรับเกณฑ์อนุมัติให้แสดงเป็นจำนวนเต็มไม่มีทศนิยมเช่นกัน
+        df_blank = pd.DataFrame()
+        df_blank['ลำดับ'] = df_safety['No']
+        df_blank['รหัสพัสดุ'] = df_safety['SAP_Code']
+        df_blank['ชื่อพัสดุ'] = df_safety['Description']
+        df_blank['หน่วยนับ'] = df_safety['Unit']
+        df_blank['อนุมัติ safety stock'] = df_safety[warehouse_option].astype(int)
+        
+        st.dataframe(df_blank.style.format({'อนุมัติ safety stock': '{:,}'}), use_container_width=True, hide_index=True)
 
 else:
     st.error("❌ ไม่พบไฟล์ฐานข้อมูลเกณฑ์พัสดุ (Safety Stock) ในระบบ")
