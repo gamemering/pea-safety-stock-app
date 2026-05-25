@@ -185,40 +185,52 @@ if df_safety is not None:
                         st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
                         st.cache_data.clear() 
                         
-                        # --- 📱 ระบบวิเคราะห์และยิงไลน์กลุ่มอัตโนมัติเบื้องหลังทันที ---
+                        # --- 📱 ระบบวิเคราะห์และยิงไลน์กลุ่มอัตโนมัติเบื้องหลังทันที (ซ่อมแซมตรรกะผลต่างให้เสถียร) ---
                         if "line_group_id" in st.secrets:
-                            df_safety[upload_target] = df_safety[upload_target].fillna(0)
+                            df_safety_line = df_safety.copy()
+                            df_parsed_line = df_parsed.copy()
                             
-                            df_safety_clean = df_safety.copy()
-                            df_parsed_clean = df_parsed.copy()
-                            df_safety_clean['SAP_Code_Tmp'] = df_safety_clean['SAP_Code'].astype(str).str.replace('-', '').str.strip()
-                            df_parsed_clean['SAP_Code_Tmp'] = df_parsed_clean['SAP_Code'].astype(str).str.strip()
+                            df_safety_line['SAP_Code'] = df_safety_line['SAP_Code'].astype(str).str.strip()
+                            df_parsed_line['SAP_Code'] = df_parsed_line['SAP_Code'].astype(str).str.strip()
                             
-                            df_merge_auto = pd.merge(df_safety_clean, df_parsed_clean, on='SAP_Code_Tmp', how='left')
-                            df_merge_auto['Qty_0021'] = df_merge_auto['Qty_0021'].fillna(0)
+                            # ปรับมาใช้ตรรกะเชื่อมตารางตรง ๆ ตามรูปแบบของส่วนที่ 4 หน้าเว็บแอป
+                            df_merge_auto = pd.merge(df_safety_line, df_parsed_line, on='SAP_Code', how='left')
                             
-                            # กรองเอาเฉพาะรายการพัสดุใน 0021 ที่มียอดต่ำกว่าเกณฑ์
-                            df_shortage_auto = df_merge_auto[df_merge_auto['Qty_0021'] < df_merge_auto[upload_target]]
+                            # ล้างปัญหาฟอร์แมตตัวแปร บังคับแปลงเป็นตัวเลขเพื่อความแม่นยำในการคำนวณผลต่าง
+                            df_merge_auto['Qty_0021'] = pd.to_numeric(df_merge_auto['Qty_0021'], errors='coerce').fillna(0)
+                            df_merge_auto[upload_target] = pd.to_numeric(df_merge_auto[upload_target], errors='coerce').fillna(0)
+                            
+                            # คำนวณหาค่าผลต่างติดลบ (ของขาดแคลน)
+                            df_merge_auto['คงเหลือ_0021'] = df_merge_auto['Qty_0021'] - df_merge_auto[upload_target]
+                            df_shortage_auto = df_merge_auto[df_merge_auto['คงเหลือ_0021'] < 0]
                             
                             if not df_shortage_auto.empty:
-                                line_msg = f"🚨 [รายงานพัสดุต่ำกว่าเกณฑ์ Safety Stock]\n📊 คลังพัสดุ: {upload_target}\n\n📌 รายการพัสดุวิกฤต:\n"
+                                total_shortage = len(df_shortage_auto)
+                                line_msg = f"🚨 [รายงานแจ้งเตือนพัสดุต่ำกว่าเกณฑ์ Safety Stock]\n📊 พื้นที่คลังพัสดุ: {upload_target}\n⚠️ ตรวจพบรายการวิกฤตทั้งหมด: {total_shortage} รายการ\n\n📌 รายการพัสดุวิกฤตและยอดผลต่างที่ขาดคลัง:\n"
+                                
+                                # วนลูปสกัดข้อมูลผลต่างพัสดุวิกฤตเพื่อเตรียมยิงเข้า LINE กลุ่ม
                                 for idx, row in enumerate(df_shortage_auto.iterrows(), 1):
                                     data = row[1]
                                     current_0021 = int(data['Qty_0021'])
                                     limit_stock = int(data[upload_target])
                                     needed_qty = limit_stock - current_0021
                                     
-                                    line_msg += f"{idx}. รหัส: {data['SAP_Code_x']}\n"
+                                    line_msg += f"{idx}. รหัส: {data['SAP_Code']}\n"
                                     line_msg += f"   {data['Description']}\n"
-                                    line_msg += f"   ยอดคลังย่อย: {current_0021} | เกณฑ์: {limit_stock}\n"
-                                    line_msg += f"   ❌ ขาดอีก: {needed_qty}\n"
+                                    line_msg += f"   ยอดคลังย่อย: {current_0021} | เกณฑ์อนุมัติ: {limit_stock}\n"
+                                    line_msg += f"   ❌ ผลต่าง (ขาดอีก): {needed_qty}\n"
                                     line_msg += "----------------------------------\n"
                                     
+                                    # ป้องกันการยิงตัวอักษรเกินโควตา 5,000 ตัวของ LINE (ถ้าของขาดเยอะเกิน 25 รายการ ให้ตัดสรุปยอดท้ายข้อความ)
+                                    if idx >= 25:
+                                        line_msg += f"🔺 และยังมีรายการอื่น ๆ ที่ต่ำกว่าเกณฑ์อีก {total_shortage - 25} รายการ ตรวจสอบเพิ่มเติมได้บนระบบหน้าเว็บครับ\n"
+                                        break
+                                        
                                 status_code = send_line_message(line_msg, st.secrets["line_group_id"])
                                 if status_code == 200:
-                                    st.sidebar.success("📱 ส่งสัญญาณแจ้งเตือนเข้า LINE เรียบร้อยแล้ว!")
+                                    st.sidebar.success("📱 ส่งสัญญาณแจ้งเตือนและรายการผลต่างเข้า LINE แล้ว!")
                                 else:
-                                    st.sidebar.warning(f"⚠️ บันทึกสำเร็จ แต่ไลน์ไม่ส่ง (Code: {status_code})")
+                                    st.sidebar.warning(f"⚠️ บันทึกสำเร็จ แต่ไลน์ไม่ส่ง (LINE API Code: {status_code})")
             else:
                 st.sidebar.warning("⚠️ ไม่พบข้อมูลพัสดุในไฟล์ที่อัปโหลด")
         except Exception as e:
