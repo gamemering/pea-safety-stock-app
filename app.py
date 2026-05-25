@@ -136,7 +136,7 @@ if df_safety is not None:
             st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูล: {e}")
 
 
-    # --- ส่วนที่ 4: การประมวลผลจัดเรียงตารางตามลำดับคอลัมน์ใหม่ล่าสุด ---
+    # --- ส่วนที่ 4: การประมวลผลคำนวณและจัดตารางแสดงผลตามบล็อกใหม่ ---
     st.write(f"📊 กำลังแสดงยอดเปรียบเทียบคลัง: **{warehouse_option}**")
     
     df_mb52_clean = st.session_state['warehouse_db'].get(warehouse_option, None)
@@ -149,19 +149,18 @@ if df_safety is not None:
         df_merge['Actual_Qty'] = df_merge['Actual_Qty'].fillna(0)
         df_merge['Qty_0021'] = df_merge['Qty_0021'].fillna(0)
 
-        # โครงสร้างตาราง 7 คอลัมน์ (ย้ายยอดรวมมาไว้หน้าเกณฑ์อนุมัติ)
+        # โครงสร้างตาราง 7 คอลัมน์ที่สลับตำแหน่ง 5 กับ 6 เรียบร้อยแล้ว
         df_result = pd.DataFrame()
         df_result['ลำดับ'] = df_merge['No']
         df_result['รหัสพัสดุ'] = df_merge['SAP_Code']
         df_result['ชื่อพัสดุ'] = df_merge['Description']
-        
-        # ย้ายคอลัมน์นี้มาอยู่หน้าอนุมัติ safety stock ตามสั่ง
         df_result['จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)'] = df_merge['Actual_Qty'].round(0).astype(int)
         
-        df_result['อนุมัติ safety stock'] = df_merge[warehouse_option].astype(int)
+        # สลับเอา จำนวนพัสดุ 0021 ขึ้นก่อน (คอลัมน์ที่ 5) แล้วตามด้วย เกณฑ์อนุมัติ (คอลัมน์ที่ 6)
         df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] = df_merge['Qty_0021'].round(0).astype(int)
+        df_result['อนุมัติ safety stock'] = df_merge[warehouse_option].astype(int)
         
-        # ยอดคงเหลือผลต่างของคลัง 0021 (สูตรเดิม: ยอด 0021 - เกณฑ์อนุมัติ)
+        # ยอดคงเหลือผลต่างของคลัง 0021 (สูตร: ยอด 0021 - เกณฑ์อนุมัติ)
         df_result['คงเหลือ (ผลต่าง 0021)'] = df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] - df_result['อนุมัติ safety stock']
 
         # ฟังก์ชันไฮไลต์สีแดงเมื่อคลังย่อย 0021 ต่ำกว่าเกณฑ์อนุมัติ (ค่าติดลบ < 0)
@@ -171,8 +170,8 @@ if df_safety is not None:
         # การจัดฟอร์แมตเลขจำนวนเต็มคั่นด้วยคอมม่าหลักพัน
         format_dict = {
             'จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)': '{:,}',
-            'อนุมัติ safety stock': '{:,}',
             'จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)': '{:,}',
+            'อนุมัติ safety stock': '{:,}',
             'คงเหลือ (ผลต่าง 0021)': '{:,}'
         }
 
@@ -197,7 +196,4 @@ if df_safety is not None:
         df_blank['ชื่อพัสดุ'] = df_safety['Description']
         df_blank['หน่วยนับ'] = df_safety['Unit']
         df_blank['อนุมัติ safety stock'] = df_safety[warehouse_option].astype(int)
-        st.dataframe(df_blank.style.format({'อนุมัติ safety stock': '{:,}'}), use_container_width=True, hide_index=True)
-
-else:
-    st.error("❌ ไม่พบไฟล์ฐานข้อมูลเกณฑ์พัสดุ (Safety Stock) ในระบบ")
+        st.dataframe(df_blank.style.format({'อนุมัติ safety stock': '{:,
