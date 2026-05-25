@@ -10,7 +10,7 @@ st.set_page_config(layout="wide", page_title="ระบบติดตาม Saf
 st.title("📦 ระบบแจ้งเตือนและติดตามเกณฑ์พัสดุสำรอง (Safety Stock)")
 st.subheader("เปรียบเทียบเกณฑ์อนุมัติประจำปี 2569 กับ ยอดคงคลังปัจจุบัน (MB52)")
 
-# 🔥 ตรงนี้สำคัญมาก: เปลี่ยนคำว่า pea_safety_stock_db ให้เป็นชื่อไฟล์ Google Sheets ของคุณจริง ๆ
+# 🔥 ระบุชื่อไฟล์ Google Sheets ที่อยู่บน Google Drive
 GOOGLE_SHEET_NAME = "pea_safety_stock_db"
 
 # --- ฟังก์ชันสำหรับเชื่อมต่อ Google Sheets ผ่านคีย์ลับใน Secrets ---
@@ -55,7 +55,6 @@ def load_safety_stock_from_file(file_path):
     return None
 
 df_safety = load_safety_stock_from_file(detected_file)
-
 
 # --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP (Text Parser) ---
 def parse_mb52_txt(file_content):
@@ -168,12 +167,18 @@ if df_safety is not None:
     if client is not None:
         try:
             sh = client.open(GOOGLE_SHEET_NAME)
-            worksheet = sh.worksheet(warehouse_option)
-            records = worksheet.get_all_records()
-            if records:
-                df_mb52_clean = pd.DataFrame(records)
+            try:
+                worksheet = sh.worksheet(warehouse_option)
+                records = worksheet.get_all_records()
+                if records:
+                    df_mb52_clean = pd.DataFrame(records)
+            except gspread.exceptions.WorksheetNotFound:
+                df_mb52_clean = None
         except Exception:
             df_mb52_clean = None
+
+    # เคลียร์ปัญหาเกณฑ์พัสดุใน GitHub มีค่าว่างเปล่า (NaN) ป้องกันการพังในทุก ๆ จุดคำนวณ
+    df_safety[warehouse_option] = df_safety[warehouse_option].fillna(0)
 
     if df_mb52_clean is not None and not df_mb52_clean.empty:
         df_safety['SAP_Code'] = df_safety['SAP_Code'].astype(str).str.strip()
@@ -220,7 +225,8 @@ if df_safety is not None:
         df_blank['รหัสพัสดุ'] = df_safety['SAP_Code']
         df_blank['ชื่อพัสดุ'] = df_safety['Description']
         df_blank['หน่วยนับ'] = df_safety['Unit']
-        df_blank['อนุมัติ safety stock'] = df_safety[warehouse_option].astype(int)
+        # 🛠️ จุดที่แก้ไข: เติม .fillna(0) เข้าไปเพื่อป้องกันกรณีเจอค่าว่างเปล่าในไฟล์เกณฑ์
+        df_blank['อนุมัติ safety stock'] = df_safety[warehouse_option].fillna(0).astype(int)
         st.dataframe(df_blank.style.format({'อนุมัติ safety stock': '{:,}'}), use_container_width=True, hide_index=True)
 
 else:
