@@ -97,17 +97,14 @@ def parse_mb52_txt(file_content):
         if not line_clean:
             continue
             
-        # ใช้การแบ่งก้อนคำด้วยช่องว่างว่างเปล่า
         tokens = line_clean.split()
         
-        # ดักจับบรรทัดพัสดุจริง: ก้อนแรกต้องเป็นตัวเลขรหัสพัสดุ และมีความยาวคำเพียงพอ
         if len(tokens) >= 4:
-            raw_mat = tokens[0].replace('-', '').strip() # ล้างขีดกลางกรณีหลุดมา
+            raw_mat = tokens[0].replace('-', '').strip()
             
-            # ตรวจสอบว่าคำแรกเป็นตัวเลขรหัสพัสดุจาก SAP แน่ ๆ
             if re.match(r'^\d+$', raw_mat):
-                raw_sloc = tokens[1].strip()  # คลังย่อย SLoc (ก้อนที่ 2)
-                raw_qty = tokens[3].strip()   # ยอดคงคลัง Unrestricted (ก้อนที่ 4)
+                raw_sloc = tokens[1].strip()  
+                raw_qty = tokens[3].strip()   
                 
                 qty_str = raw_qty.replace(',', '')
                 try:
@@ -256,11 +253,13 @@ if df_safety is not None:
                 if not target_chat_id:
                     st.warning("⚠️ กรุณากรอกรหัส ID ปลายทางก่อนกดส่งครับ")
                 else:
-                    # สร้างข้อความรายงานพัสดุขาด
+                    # 🛠️ จุดที่แก้ไข: เปลี่ยนมาใช้ .iterrows() เพื่อเรียกชื่อไทยตรง ๆ ป้องกันปัญหาลำดับคอลัมน์เคลื่อน
                     line_msg = f"🚨 [รายงานพัสดุต่ำกว่าเกณฑ์ความปลอดภัย]\n📊 พื้นที่คลัง: {warehouse_option}\n\n📌 รายการพัสดุวิกฤต:\n"
-                    for idx, row in enumerate(df_shortage.itertuples(), 1):
-                        needed = abs(row._7) # จำนวนที่ขาดคลัง
-                        line_msg += f"{idx}. รหัส: {row.รหัสพัสดุ}\n   {row.ชื่อพัสดุ}\n   ยอดคลังย่อย: {row._5} | เกณฑ์: {row.อนุมัติ_safety_stock}\n   ❌ ขาดอีก: {needed}\n"
+                    
+                    for idx, row in enumerate(df_shortage.iterrows(), 1):
+                        data = row[1]  # ดึงข้อมูลของบรรทัดนั้น ๆ มาใช้งาน
+                        needed = abs(int(data['คงเหลือ (ผลต่าง 0021)'])) 
+                        line_msg += f"{idx}. รหัส: {data['รหัสพัสดุ']}\n   {data['ชื่อพัสดุ']}\n   ยอดคลังย่อย: {data['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)']} | เกณฑ์: {data['อนุมัติ safety stock']}\n   ❌ ขาดอีก: {needed}\n"
                         line_msg += "----------------------------------\n"
                     
                     with st.spinner("กำลังส่งข้อมูลเข้าไลน์กลุ่ม..."):
