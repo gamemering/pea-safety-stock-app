@@ -57,29 +57,25 @@ def load_safety_stock_from_file(file_path):
 df_safety = load_safety_stock_from_file(detected_file)
 
 
-# --- ส่วนที่ 2: ฟังก์ชันใหม่สำหรับแกะเนื้อหาไฟล์จาก SAP จริง (Table-based Parser) ---
+# --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์จาก SAP จริง (ล้างขีดออกให้สะอาด) ---
 def parse_mb52_txt(file_content):
     material_data = {}
     lines = file_content.split('\n')
     
     for line in lines:
-        # สนใจเฉพาะบรรทัดที่มีข้อมูลแบ่งด้วยเครื่องหมาย |
         if '|' not in line:
             continue
             
         tokens = [t.strip() for t in line.split('|')]
         
-        # ข้ามบรรทัดหัวข้อตารางและบรรทัดที่ไม่มีข้อมูลพัสดุจริง
         if len(tokens) < 6 or 'Material' in tokens or 'Material' in line:
             continue
             
-        raw_mat = tokens[1]      # คอลัมน์พัสดุ (เช่น 10003254)
-        raw_sloc = tokens[2]     # คอลัมน์คลังย่อย (SLoc เช่น 0021)
-        raw_qty = tokens[4]      # คอลัมน์ยอดคงคลัง (Unrestricted)
+        raw_mat = tokens[1].replace('-', '').strip()  # 🛠️ ปรับปรุง: ลบขีดออกจากรหัสพัสดุในไฟล์ SAP
+        raw_sloc = tokens[2].strip()
+        raw_qty = tokens[4].strip()
         
-        # ดักจับว่าต้องเป็นรหัสพัสดุที่เป็นตัวเลขล้วน (เช่น เลข 8 หลักจาก SAP)
-        if re.match(r'^\d+$', raw_mat):
-            # แปลงยอดคงคลัง ตัดคอมมาออก
+        if raw_mat:
             qty_str = raw_qty.replace(',', '')
             try:
                 qty = float(qty_str)
@@ -89,10 +85,7 @@ def parse_mb52_txt(file_content):
             if raw_mat not in material_data:
                 material_data[raw_mat] = {'Total_Qty': 0.0, 'Qty_0021': 0.0}
                 
-            # รวมยอดเข้าคลังใหญ่ (รวมทุก SLoc)
             material_data[raw_mat]['Total_Qty'] += qty
-            
-            # เจาะจงรวมยอดเฉพาะคลังย่อย 0021
             if raw_sloc == '0021':
                 material_data[raw_mat]['Qty_0021'] += qty
                 
@@ -155,6 +148,7 @@ if df_safety is not None:
                             worksheet = sh.add_worksheet(title=upload_target, rows="1000", cols="5")
                         
                         worksheet.clear()
+                        # บันทึกค่าเวอร์ชันล้างขีดแล้วลง Google Sheets เพื่อความสม่ำเสมอของดาต้า
                         data_to_save = [df_parsed.columns.tolist()] + df_parsed.values.tolist()
                         worksheet.update('A1', data_to_save)
                         
@@ -188,16 +182,17 @@ if df_safety is not None:
     df_safety[warehouse_option] = df_safety[warehouse_option].fillna(0)
 
     if df_mb52_clean is not None and not df_mb52_clean.empty:
-        df_safety['SAP_Code'] = df_safety['SAP_Code'].astype(str).str.strip()
-        df_mb52_clean['SAP_Code'] = df_mb52_clean['SAP_Code'].astype(str).str.strip()
+        # 🛠️ ปรับปรุงจุดนี้: สั่งให้ล้างขีดกลาง (-) และเว้นวรรคออกจากรหัสพัสดุทั้งคู่ ก่อนจะนำมาทำ Merge (จับคู่ตาราง)
+        df_safety['SAP_Code_Clean'] = df_safety['SAP_Code'].astype(str).str.replace('-', '').str.strip()
+        df_mb52_clean['SAP_Code_Clean'] = df_mb52_clean['SAP_Code'].astype(str).str.replace('-', '').str.strip()
 
-        df_merge = pd.merge(df_safety, df_mb52_clean, on='SAP_Code', how='left')
+        df_merge = pd.merge(df_safety, df_mb52_clean, on='SAP_Code_Clean', how='left')
         df_merge['Actual_Qty'] = df_merge['Actual_Qty'].fillna(0)
         df_merge['Qty_0021'] = df_merge['Qty_0021'].fillna(0)
 
         df_result = pd.DataFrame()
         df_result['ลำดับ'] = df_merge['No']
-        df_result['รหัสพัสดุ'] = df_merge['SAP_Code']
+        df_result['รหัสพัสดุ'] = df_merge['SAP_Code']  # โชว์รหัสรูปแบบเดิมที่ผู้ใช้ตั้งไว้ในเกณฑ์
         df_result['ชื่อพัสดุ'] = df_merge['Description']
         df_result['จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)'] = df_merge['Actual_Qty'].round(0).astype(int)
         df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] = df_merge['Qty_0021'].round(0).astype(int)
