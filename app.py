@@ -39,8 +39,8 @@ df_safety = load_safety_stock_from_file(detected_file)
 
 # --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP (Text Parser) ---
 def parse_mb52_txt(file_content):
-    """ฟังก์ชันแกะโครงสร้างข้อความ MB52 และรวมยอดพัสดุแยกตามรหัสพัสดุ"""
-    material_qty = {}
+    """ฟังก์ชันแกะโครงสร้างข้อความ MB52 โดยแยกเก็บทั้งยอดรวมทุก SLoc และยอดเฉพาะ SLoc 0021"""
+    material_data = {}
     current_material = None
     
     lines = file_content.split('\n')
@@ -55,21 +55,30 @@ def parse_mb52_txt(file_content):
         if match_mat:
             raw_code = match_mat.group(1)
             current_material = raw_code.replace('-', '')
+            if current_material not in material_data:
+                material_data[current_material] = {'Total_Qty': 0.0, 'Qty_0021': 0.0}
             continue
             
         # 2. ตรวจจับบรรทัดจำนวนพัสดุ (เช็คจากหน่วยนับมาตรฐาน)
         tokens = line.split()
         if len(tokens) >= 4:
             if tokens[3] in ['EA', 'KG', 'M', 'PAC', 'L']:
+                sloc_id = tokens[0].strip()
                 qty_str = tokens[2].replace(',', '')
                 try:
                     qty = float(qty_str)
                     if current_material:
-                        material_qty[current_material] = material_qty.get(current_material, 0.0) + qty
+                        material_data[current_material]['Total_Qty'] += qty
+                        if sloc_id == '0021':
+                            material_data[current_material]['Qty_0021'] += qty
                 except ValueError:
                     pass
                     
-    df_parsed = pd.DataFrame(list(material_qty.items()), columns=['SAP_Code', 'Actual_Qty'])
+    parsed_list = []
+    for k, v in material_data.items():
+        parsed_list.append([k, v['Total_Qty'], v['Qty_0021']])
+        
+    df_parsed = pd.DataFrame(parsed_list, columns=['SAP_Code', 'Actual_Qty', 'Qty_0021'])
     return df_parsed
 
 
@@ -120,14 +129,14 @@ if df_safety is not None:
             
             if not df_parsed.empty:
                 st.session_state['warehouse_db'][upload_target] = df_parsed
-                st.sidebar.success(f"💾 บันทึกยอดจริงเข้าสู่คลัง **{upload_target}** เรียบร้อย! (พบ {len(df_parsed)} รายการ)")
+                st.sidebar.success(f"💾 บันทึกยอดจริงเข้าสู่คลัง **{upload_target}** เรียบร้อย!")
             else:
                 st.sidebar.warning("⚠️ ไม่พบข้อมูลพัสดุในไฟล์ที่อัปโหลด")
         except Exception as e:
             st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูล: {e}")
 
 
-    # --- ส่วนที่ 4: การประมวลผลดึงข้อมูลตามคลังที่เลือกมาแสดงผล ---
+    # --- ส่วนที่ 4: การประมวลผลจัดหน้าตารางตามตรรกะ [ยอดคลังตั้ง ลบ เกณฑ์] ---
     st.write(f"📊 กำลังแสดงยอดเปรียบเทียบคลัง: **{warehouse_option}**")
     
     df_mb52_clean = st.session_state['warehouse_db'].get(warehouse_option, None)
@@ -138,56 +147,59 @@ if df_safety is not None:
 
         df_merge = pd.merge(df_safety, df_mb52_clean, on='SAP_Code', how='left')
         df_merge['Actual_Qty'] = df_merge['Actual_Qty'].fillna(0)
+        df_merge['Qty_0021'] = df_merge['Qty_0021'].fillna(0)
 
-        # จัดโครงสร้างตาราง 7 คอลัมน์
+        # สร้างตารางรูปแบบใหม่ 8 คอลัมน์เด่นชัด สบายตา
         df_result = pd.DataFrame()
         df_result['ลำดับ'] = df_merge['No']
         df_result['รหัสพัสดุ'] = df_merge['SAP_Code']
         df_result['ชื่อพัสดุ'] = df_merge['Description']
-        
-        # ปรับชนิดข้อมูลตัวเลขจำนวนชิ้นให้เป็น Integer (เลขจำนวนเต็ม) เพื่อตัดทศนิยมออก
         df_result['อนุมัติ safety stock'] = df_merge[warehouse_option].astype(int)
-        df_result['จำนวนอุปกรณ์ในคลัง'] = df_merge['Actual_Qty'].round(0).astype(int)
-        df_result['คงเหลือ (ผลต่าง)'] = df_result['จำนวนอุปกรณ์ในคลัง'] - df_result['อนุมัติ safety stock']
         
-        # เปอร์เซ็นต์เก็บทศนิยมไว้ 2 ตำแหน่งตามมาตรฐานการวิเคราะห์ แต่ถ้าค่าเป็น .00 ระบบจะแสดงผลสวยงาม
-        df_result['เปอร์เซ็นต์ (%)'] = df_result.apply(
-            lambda r: round((r['คงเหลือ (ผลต่าง)'] / r['อนุมัติ safety stock'] * 100), 2) if r['อนุมัติ safety stock'] > 0 else 0.0, 
-            axis=1
-        )
+        # คอลัมน์ยอดคงคลัง 0021 อยู่ติดกับเกณฑ์อนุมัติ
+        df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] = df_merge['Qty_0021'].round(0).astype(int)
+        
+        # ปรับสูตรกลับตามที่คุย: คงเหลือ (ผลต่าง 0021) = ยอดคงคลัง 0021 - เกณฑ์อนุมัติ Safety
+        df_result['คงเหลือ (ผลต่าง 0021)'] = df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] - df_result['อนุมัติ safety stock']
+        
+        # ย้ายข้อมูลภาพรวมคลังทั้งหมดไปไว้โซนท้ายตาราง
+        df_result['จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)'] = df_merge['Actual_Qty'].round(0).astype(int)
+        
+        # สูตรภาพรวมปรับให้สอดคล้องกัน: คงเหลือ (ผลต่างภาพรวม) = ยอดคงคลังรวม - เกณฑ์อนุมัติ Safety
+        df_result['คงเหลือ (ผลต่างภาพรวม)'] = df_result['จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)'] - df_result['อนุมัติ safety stock']
 
-        # ฟังก์ชันกำหนดสีไฮไลต์ (ติดลบสีแดง)
+        # ฟังก์ชันไฮไลต์สีแดง: ยอดคลังตั้งลบเกณฑ์ แปลว่าหากค่า "ติดลบ (< 0)" คือของขาดแคลน
         def alert_low_stock(val):
             return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if val < 0 else ''
 
-        # จัดฟอร์แมตการแสดงผลตาราง: ใส่เครื่องหมายจุลภาคคั่นหลักพัน (, ) และตัดทศนิยมตัวเลขจำนวนชิ้นออก
+        # การจัดฟอร์แมตคอมม่าหลักพันตัวเลขจำนวนเต็ม
         format_dict = {
             'อนุมัติ safety stock': '{:,}',
-            'จำนวนอุปกรณ์ในคลัง': '{:,}',
-            'คงเหลือ (ผลต่าง)': '{:,}',
-            'เปอร์เซ็นต์ (%)': '{:,.2f}%'
+            'จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)': '{:,}',
+            'คงเหลือ (ผลต่าง 0021)': '{:,}',
+            'จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)': '{:,}',
+            'คงเหลือ (ผลต่างภาพรวม)': '{:,}'
         }
 
-        styled_df = df_result.style.map(alert_low_stock, subset=['คงเหลือ (ผลต่าง)']).format(format_dict)
+        # สั่งย้อมแถบสีแดงเตือนทันทีเมื่อค่าติดลบ (ของต่ำกว่าเกณฑ์) ในทั้งสองคอลัมน์ผลต่าง
+        styled_df = df_result.style.map(alert_low_stock, subset=['คงเหลือ (ผลต่าง 0021)', 'คงเหลือ (ผลต่างภาพรวม)']).format(format_dict)
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
-        shortage_items = df_result[df_result['คงเหลือ (ผลต่าง)'] < 0]
-        if not shortage_items.empty:
-            st.error(f"🚨 คลัง **{warehouse_option}** มีพัสดุต่ำกว่าเกณฑ์ความปลอดภัยจำนวน **{len(shortage_items)}** รายการ! กรุณาเปิดใบ PR ด่วน")
-        else:
-            st.success(f"✅ พัสดุทั้งหมดในคลัง **{warehouse_option}** อยู่ในระดับที่ปลอดภัยครบถ้วน")
+        # นับจำนวนรายการที่ของขาดเกณฑ์จริง (ค่า < 0) เพื่อรายงานผลด้านล่างตาราง
+        shortage_0021 = len(df_result[df_result['คงเหลือ (ผลต่าง 0021)'] < 0])
+        shortage_total = len(df_result[df_result['คงเหลือ (ผลต่างภาพรวม)'] < 0])
+        
+        st.error(f"🚨 สรุปสถานะคลัง **{warehouse_option}**: คลังย่อย 0021 มีของต่ำกว่าเกณฑ์ {shortage_0021} รายการ | ภาพรวมทุก SLoc มีของต่ำกว่าเกณฑ์ {shortage_total} รายการ")
             
     else:
-        st.info(f"ℹ️ ยังไม่มีการอัปเดตข้อมูลยอดคงคลังจริงของคลัง **{warehouse_option}** เข้ามาในระบบ (ตารางด้านล่างแสดงเฉพาะเกณฑ์ที่ตั้งไว้)")
+        st.info(f"📊 กรุณาลากไฟล์รายงานยอดคงคลังจาก SAP มาวางที่ช่องด้านซ้ายมือเพื่อคำนวณยอดส่วนต่าง")
         
-        # สำหรับตารางตัวอย่างเปล่า ปรับเกณฑ์อนุมัติให้แสดงเป็นจำนวนเต็มไม่มีทศนิยมเช่นกัน
         df_blank = pd.DataFrame()
         df_blank['ลำดับ'] = df_safety['No']
         df_blank['รหัสพัสดุ'] = df_safety['SAP_Code']
         df_blank['ชื่อพัสดุ'] = df_safety['Description']
         df_blank['หน่วยนับ'] = df_safety['Unit']
         df_blank['อนุมัติ safety stock'] = df_safety[warehouse_option].astype(int)
-        
         st.dataframe(df_blank.style.format({'อนุมัติ safety stock': '{:,}'}), use_container_width=True, hide_index=True)
 
 else:
