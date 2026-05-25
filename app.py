@@ -136,7 +136,7 @@ if df_safety is not None:
             st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูล: {e}")
 
 
-    # --- ส่วนที่ 4: การประมวลผลคำนวณและจัดตารางแสดงผลตามบล็อกใหม่ ---
+    # --- ส่วนที่ 4: การประมวลผลจัดตารางแสดงผลตามเงื่อนไขที่กำหนด ---
     st.write(f"📊 กำลังแสดงยอดเปรียบเทียบคลัง: **{warehouse_option}**")
     
     df_mb52_clean = st.session_state['warehouse_db'].get(warehouse_option, None)
@@ -149,25 +149,27 @@ if df_safety is not None:
         df_merge['Actual_Qty'] = df_merge['Actual_Qty'].fillna(0)
         df_merge['Qty_0021'] = df_merge['Qty_0021'].fillna(0)
 
-        # โครงสร้างตาราง 7 คอลัมน์ที่สลับตำแหน่ง 5 กับ 6 เรียบร้อยแล้ว
+        # ขึ้นโครงสร้างตาราง 7 คอลัมน์ สลับตำแหน่ง 5-6 และย้ายยอดรวมมาคอลัมน์ที่ 4 เรียบร้อย
         df_result = pd.DataFrame()
         df_result['ลำดับ'] = df_merge['No']
         df_result['รหัสพัสดุ'] = df_merge['SAP_Code']
         df_result['ชื่อพัสดุ'] = df_merge['Description']
+        
+        # คอลัมน์ที่ 4: จำนวนในคลังทั้งหมด
         df_result['จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)'] = df_merge['Actual_Qty'].round(0).astype(int)
         
-        # สลับเอา จำนวนพัสดุ 0021 ขึ้นก่อน (คอลัมน์ที่ 5) แล้วตามด้วย เกณฑ์อนุมัติ (คอลัมน์ที่ 6)
+        # คอลัมน์ที่ 5 และ 6: สลับสับเปลี่ยนตำแหน่งตามคำสั่งล่าสุด
         df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] = df_merge['Qty_0021'].round(0).astype(int)
         df_result['อนุมัติ safety stock'] = df_merge[warehouse_option].astype(int)
         
-        # ยอดคงเหลือผลต่างของคลัง 0021 (สูตร: ยอด 0021 - เกณฑ์อนุมัติ)
+        # คอลัมน์ที่ 7: คงเหลือผลต่าง 0021 (สูตร: ยอด 0021 - เกณฑ์อนุมัติ)
         df_result['คงเหลือ (ผลต่าง 0021)'] = df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] - df_result['อนุมัติ safety stock']
 
-        # ฟังก์ชันไฮไลต์สีแดงเมื่อคลังย่อย 0021 ต่ำกว่าเกณฑ์อนุมัติ (ค่าติดลบ < 0)
+        # ฟังก์ชันไฮไลต์สีแดงเมื่อยอดคลังย่อย 0021 ต่ำกว่าเกณฑ์อนุมัติ (ค่าติดลบ < 0)
         def alert_low_stock(val):
             return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if val < 0 else ''
 
-        # การจัดฟอร์แมตเลขจำนวนเต็มคั่นด้วยคอมม่าหลักพัน
+        # รูปแบบฟอร์แมตคอมม่าหลักพันจำนวนเต็ม
         format_dict = {
             'จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)': '{:,}',
             'จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)': '{:,}',
@@ -175,11 +177,11 @@ if df_safety is not None:
             'คงเหลือ (ผลต่าง 0021)': '{:,}'
         }
 
-        # ย้อมสีแจ้งเตือนเฉพาะในช่องผลต่างของคลังย่อย 0021 เท่านั้น
+        # ย้อมสีแดงเตือนในช่องผลต่างของคลังย่อย 0021
         styled_df = df_result.style.map(alert_low_stock, subset=['คงเหลือ (ผลต่าง 0021)']).format(format_dict)
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
-        # นับจำนวนรายการวิกฤตของคลังย่อย 0021 เพื่อแสดงสรุปด้านล่าง
+        # นับจำนวนรายการวิกฤตของคลังย่อย 0021
         shortage_0021 = len(df_result[df_result['คงเหลือ (ผลต่าง 0021)'] < 0])
         
         if shortage_0021 > 0:
@@ -196,4 +198,9 @@ if df_safety is not None:
         df_blank['ชื่อพัสดุ'] = df_safety['Description']
         df_blank['หน่วยนับ'] = df_safety['Unit']
         df_blank['อนุมัติ safety stock'] = df_safety[warehouse_option].astype(int)
-        st.dataframe(df_blank.style.format({'อนุมัติ safety stock': '{:,
+        
+        # แก้ไข Syntax Error โครงสร้างจุดนี้ให้คลีนสมบูรณ์
+        st.dataframe(df_blank.style.format({'อนุมัติ safety stock': '{:,}'}), use_container_width=True, hide_index=True)
+
+else:
+    st.error("❌ ไม่พบไฟล์ฐานข้อมูลเกณฑ์พัสดุ (Safety Stock) ในระบบ")
