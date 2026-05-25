@@ -4,6 +4,8 @@ import os
 import re
 from google.oauth2.service_account import Credentials
 import gspread
+import requests  # ➕ เพิ่มสำหรับใช้ส่ง LINE
+import json      # ➕ เพิ่มสำหรับใช้ส่ง LINE
 
 st.set_page_config(layout="wide", page_title="ระบบติดตาม Safety Stock คลังพัสดุ")
 
@@ -27,6 +29,32 @@ def get_gspread_client():
     except Exception as e:
         st.error(f"❌ ระบบความปลอดภัยปฏิเสธการเชื่อมต่อ (Secrets Error): {e}")
         return None
+
+# --- 📱 ฟังก์ชันสำหรับส่งข้อความผ่าน LINE Messaging API (เพิ่มสำหรับปุ่มทดสอบ) ---
+def send_line_message(message_text, target_id):
+    try:
+        url = "https://api.line.me/v2/bot/message/push"
+        token = st.secrets["line_channel_access_token"]
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}"
+        }
+        
+        payload = {
+            "to": target_id,
+            "messages": [
+                {
+                    "type": "text",
+                    "text": message_text
+                }
+            ]
+        }
+        
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        return response.status_code
+    except Exception as e:
+        return str(e)
 
 # --- ส่วนที่ 1: ค้นหาไฟล์เกณฑ์ Safety Stock อัตโนมัติในโฟลเดอร์ GitHub ---
 def find_safety_stock_file():
@@ -155,12 +183,26 @@ if df_safety is not None:
                         data_to_save = [df_parsed.columns.tolist()] + df_parsed.values.tolist()
                         worksheet.update('A1', data_to_save)
                         
-                        st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สมเร็จ!")
+                        st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
                         st.cache_data.clear() 
             else:
                 st.sidebar.warning("⚠️ ไม่พบข้อมูลพัสดุในไฟล์ที่อัปโหลด")
         except Exception as e:
             st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูลลงแผ่นงาน: {e}")
+
+    # --- 🧪 ปุ่มกดทดสอบยิง LINE ด้วยตนเอง (เพิ่มเข้ามาใหม่ตามสั่ง) ---
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🧪 เครื่องมือทดสอบระบบ LINE")
+    if st.sidebar.button("⚡ ยิงข้อความทดสอบเข้า LINE ทันที"):
+        if "line_group_id" in st.secrets:
+            target = st.secrets["line_group_id"]
+            status_code = send_line_message("🎯 สัญญาณชีพปกติ! ระบบแจ้งเตือน Safety Stock เชื่อมต่อกับ LINE สำเร็จแล้วครับ", target)
+            if status_code == 200:
+                st.sidebar.success("✅ LINE เด้งแล้ว! รหัสกลุ่มและ Token ถูกต้อง 100%")
+            else:
+                st.sidebar.error(f"❌ LINE ไม่เด้ง! รหัสตอบกลับคือ Code: {status_code}")
+        else:
+            st.sidebar.error("❌ ไม่พบรหัส line_group_id ในหน้าต่าง Secrets หลังบ้าน")
 
 
     # --- ส่วนที่ 4: การดึงดาต้าจาก Google Sheets มาคำนวณโชว์ผล ---
@@ -217,7 +259,7 @@ if df_safety is not None:
         shortage_0021 = len(df_result[df_result['คงเหลือ (ผลต่าง 0021)'] < 0])
         
         if shortage_0021 > 0:
-            st.error(f"🚨 สถานะคลัง **{warehouse_option}**: ตรวจพบพัสดุในคลังย่อย 0021 ต่ำกว่าเกณฑ์ความปลอดภัยจำนวน **{shortage_0021}** รายการ!")
+            st.error(f"🚨 Status คลัง **{warehouse_option}**: ตรวจพบพัสดุในคลังย่อย 0021 ต่ำกว่าเกณฑ์ความปลอดภัยจำนวน **{shortage_0021}** รายการ!")
         else:
             st.success(f"✅ พัสดุทั้งหมดในคลังย่อย 0021 ของคลัง **{warehouse_option}** อยู่ในระดับที่ปลอดภัยครบถ้วน")
             
