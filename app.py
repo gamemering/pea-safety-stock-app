@@ -136,7 +136,7 @@ if df_safety is not None:
             st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูล: {e}")
 
 
-    # --- ส่วนที่ 4: การประมวลผลคำนวณและจัดตารางแสดงผล 7 คอลัมน์ ---
+    # --- ส่วนที่ 4: การประมวลผลจัดเรียงตารางตามลำดับคอลัมน์ใหม่ล่าสุด ---
     st.write(f"📊 กำลังแสดงยอดเปรียบเทียบคลัง: **{warehouse_option}**")
     
     df_mb52_clean = st.session_state['warehouse_db'].get(warehouse_option, None)
@@ -149,30 +149,31 @@ if df_safety is not None:
         df_merge['Actual_Qty'] = df_merge['Actual_Qty'].fillna(0)
         df_merge['Qty_0021'] = df_merge['Qty_0021'].fillna(0)
 
-        # โครงสร้างตาราง 7 คอลัมน์ตามล็อกใหม่ล่าสุด
+        # โครงสร้างตาราง 7 คอลัมน์ (ย้ายยอดรวมมาไว้หน้าเกณฑ์อนุมัติ)
         df_result = pd.DataFrame()
         df_result['ลำดับ'] = df_merge['No']
         df_result['รหัสพัสดุ'] = df_merge['SAP_Code']
         df_result['ชื่อพัสดุ'] = df_merge['Description']
-        df_result['อนุมัติ safety stock'] = df_merge[warehouse_option].astype(int)
         
-        # ส่วนคลังย่อย 0021 และยอดคงเหลือผลต่าง
-        df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] = df_merge['Qty_0021'].round(0).astype(int)
-        df_result['คงเหลือ (ผลต่าง 0021)'] = df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] - df_result['อนุมัติ safety stock']
-        
-        # ยอดรวมคลังทั้งหมด (SLoc ทั้งหมดบวกรวมกัน) วางปิดท้ายโครงสร้างตาราง
+        # ย้ายคอลัมน์นี้มาอยู่หน้าอนุมัติ safety stock ตามสั่ง
         df_result['จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)'] = df_merge['Actual_Qty'].round(0).astype(int)
+        
+        df_result['อนุมัติ safety stock'] = df_merge[warehouse_option].astype(int)
+        df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] = df_merge['Qty_0021'].round(0).astype(int)
+        
+        # ยอดคงเหลือผลต่างของคลัง 0021 (สูตรเดิม: ยอด 0021 - เกณฑ์อนุมัติ)
+        df_result['คงเหลือ (ผลต่าง 0021)'] = df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] - df_result['อนุมัติ safety stock']
 
-        # ฟังก์ชันไฮไลต์สีแดง: เมื่อยอดคลังย่อย 0021 ต่ำกว่าเกณฑ์อนุมัติ (ค่าติดลบ < 0)
+        # ฟังก์ชันไฮไลต์สีแดงเมื่อคลังย่อย 0021 ต่ำกว่าเกณฑ์อนุมัติ (ค่าติดลบ < 0)
         def alert_low_stock(val):
             return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if val < 0 else ''
 
-        # การจัดฟอร์แมตเลขจำนวนเต็มคั่นด้วยคอมม่า
+        # การจัดฟอร์แมตเลขจำนวนเต็มคั่นด้วยคอมม่าหลักพัน
         format_dict = {
+            'จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)': '{:,}',
             'อนุมัติ safety stock': '{:,}',
             'จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)': '{:,}',
-            'คงเหลือ (ผลต่าง 0021)': '{:,}',
-            'จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)': '{:,}'
+            'คงเหลือ (ผลต่าง 0021)': '{:,}'
         }
 
         # ย้อมสีแจ้งเตือนเฉพาะในช่องผลต่างของคลังย่อย 0021 เท่านั้น
