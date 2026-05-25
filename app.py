@@ -58,7 +58,7 @@ def load_safety_stock_from_file(file_path):
 
 df_safety = load_safety_stock_from_file(detected_file)
 
-# --- ส่วนที่ 2: ฟังก์ชันสำหรับส่งข้อความผ่าน LINE Messaging API ---
+# --- ฟังก์ชันสำหรับส่งข้อความผ่าน LINE Messaging API ---
 def send_line_message(message_text, target_id):
     try:
         url = "https://api.line.me/v2/bot/message/push"
@@ -82,10 +82,9 @@ def send_line_message(message_text, target_id):
         response = requests.post(url, headers=headers, data=json.dumps(payload))
         return response.status_code
     except Exception as e:
-        st.error(f"❌ ระบบไม่สามารถส่งไลน์ได้เนื่องจาก: {e}")
         return None
 
-# --- ส่วนที่ 3: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP (Text Parser ตัวที่รันผ่าน) ---
+# --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP (Text Parser ตัวหลักที่คุณรันผ่าน) ---
 def parse_mb52_txt(file_content):
     material_data = {}
     current_material = None
@@ -99,17 +98,22 @@ def parse_mb52_txt(file_content):
         if line.startswith('|'):
             line = line[1:].strip()
             
+        match_mat = re.match(r'^(\d-\d{2}-\d{3}-\d{4})', line)
+        if match_mat:
+            raw_code = match_mat.group(1)
+            current_material = raw_code.replace('-', '')
+            if current_material not in material_data:
+                material_data[current_material] = {'Total_Qty': 0.0, 'Qty_0021': 0.0}
+            continue
+            
         tokens = line.split()
         if len(tokens) >= 4:
-            raw_code = tokens[0].replace('-', '').strip()
-            if re.match(r'^\d+$', raw_code):
-                sloc_id = tokens[1].strip()
-                qty_str = tokens[3].replace(',', '')
+            if tokens[3] in ['EA', 'KG', 'M', 'PAC', 'L']:
+                sloc_id = tokens[0].strip()
+                qty_str = tokens[2].replace(',', '')
                 try:
                     qty = float(qty_str)
-                    if current_material := raw_code:
-                        if current_material not in material_data:
-                            material_data[current_material] = {'Total_Qty': 0.0, 'Qty_0021': 0.0}
+                    if current_material:
                         material_data[current_material]['Total_Qty'] += qty
                         if sloc_id == '0021':
                             material_data[current_material]['Qty_0021'] += qty
@@ -152,7 +156,7 @@ if df_safety is not None:
         key=f"uploader_{upload_target}"
     )
 
-    # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร
+    # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร + 📱 ระบบส่ง LINE อัตโนมัติหลังบันทึกเสร็จ
     if uploaded_mb52 is not None:
         try:
             raw_bytes = uploaded_mb52.getvalue()
@@ -180,6 +184,41 @@ if df_safety is not None:
                         
                         st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
                         st.cache_data.clear() 
+                        
+                        # --- 📱 ระบบวิเคราะห์และยิงไลน์กลุ่มอัตโนมัติเบื้องหลังทันที ---
+                        if "line_group_id" in st.secrets:
+                            df_safety[upload_target] = df_safety[upload_target].fillna(0)
+                            
+                            df_safety_clean = df_safety.copy()
+                            df_parsed_clean = df_parsed.copy()
+                            df_safety_clean['SAP_Code_Tmp'] = df_safety_clean['SAP_Code'].astype(str).str.replace('-', '').str.strip()
+                            df_parsed_clean['SAP_Code_Tmp'] = df_parsed_clean['SAP_Code'].astype(str).str.strip()
+                            
+                            df_merge_auto = pd.merge(df_safety_clean, df_parsed_clean, on='SAP_Code_Tmp', how='left')
+                            df_merge_auto['Qty_0021'] = df_merge_auto['Qty_0021'].fillna(0)
+                            
+                            # กรองเอาเฉพาะรายการพัสดุใน 0021 ที่มียอดต่ำกว่าเกณฑ์
+                            df_shortage_auto = df_merge_auto[df_merge_auto['Qty_0021'] < df_merge_auto[upload_target]]
+                            
+                            if not df_shortage_auto.empty:
+                                line_msg = f"🚨 [รายงานพัสดุต่ำกว่าเกณฑ์ Safety Stock]\n📊 คลังพัสดุ: {upload_target}\n\n📌 รายการพัสดุวิกฤต:\n"
+                                for idx, row in enumerate(df_shortage_auto.iterrows(), 1):
+                                    data = row[1]
+                                    current_0021 = int(data['Qty_0021'])
+                                    limit_stock = int(data[upload_target])
+                                    needed_qty = limit_stock - current_0021
+                                    
+                                    line_msg += f"{idx}. รหัส: {data['SAP_Code_x']}\n"
+                                    line_msg += f"   {data['Description']}\n"
+                                    line_msg += f"   ยอดคลังย่อย: {current_0021} | เกณฑ์: {limit_stock}\n"
+                                    line_msg += f"   ❌ ขาดอีก: {needed_qty}\n"
+                                    line_msg += "----------------------------------\n"
+                                    
+                                status_code = send_line_message(line_msg, st.secrets["line_group_id"])
+                                if status_code == 200:
+                                    st.sidebar.success("📱 ส่งสัญญาณแจ้งเตือนเข้า LINE เรียบร้อยแล้ว!")
+                                else:
+                                    st.sidebar.warning(f"⚠️ บันทึกสำเร็จ แต่ไลน์ไม่ส่ง (Code: {status_code})")
             else:
                 st.sidebar.warning("⚠️ ไม่พบข้อมูลพัสดุในไฟล์ที่อัปโหลด")
         except Exception as e:
@@ -237,46 +276,10 @@ if df_safety is not None:
         styled_df = df_result.style.map(alert_low_stock, subset=['คงเหลือ (ผลต่าง 0021)']).format(format_dict)
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
-        # ค้นหารายการที่ยอดคงเหลือติดลบ (ต่ำกว่าเกณฑ์ความปลอดภัย)
-        df_shortage = df_result[df_result['คงเหลือ (ผลต่าง 0021)'] < 0]
-        shortage_0021 = len(df_shortage)
+        shortage_0021 = len(df_result[df_result['คงเหลือ (ผลต่าง 0021)'] < 0])
         
         if shortage_0021 > 0:
             st.error(f"🚨 สถานะคลัง **{warehouse_option}**: ตรวจพบพัสดุในคลังย่อย 0021 ต่ำกว่าเกณฑ์ความปลอดภัยจำนวน **{shortage_0021}** รายการ!")
-            
-            # --- 📱 ส่วนเชื่อมต่อปุ่มส่งข้อมูลเข้า LINE บัญชีทางการ ---
-            st.markdown("---")
-            st.markdown("### 📱 ระบบส่งรายงานด่วนเข้า LINE ผู้บริหาร")
-            target_chat_id = st.text_input(
-                "กรอกรหัส LINE Group ID ปลายทางที่ต้องการให้บอตยิงข้อความเข้าไป:", 
-                value="", 
-                help="ใส่รหัสไอดีกลุ่ม (ที่ขึ้นต้นด้วย ตัว C) เพื่อระบุเป้าหมายกลุ่มไลน์ผู้บริหาร"
-            )
-            
-            if st.button("🚀 ยิงรายงานพัสดุขาดแคลนเข้า LINE ทันที"):
-                if not target_chat_id:
-                    st.warning("⚠️ กรุณากรอกรหัสไอดีกลุ่ม LINE ก่อนกดปุ่มส่งนะครับ")
-                else:
-                    # สร้างเนื้อหาข้อความรายงานแบบรวบรัดและเข้าใจง่าย
-                    line_msg = f"🚨 [รายงานพัสดุต่ำกว่าเกณฑ์ Safety Stock]\n📊 คลังพัสดุ: {warehouse_option}\n\n📌 รายการพัสดุวิกฤต:\n"
-                    
-                    for idx, row in enumerate(df_shortage.itertuples(), 1):
-                        needed_qty = abs(int(getattr(row, '_7'))) # จำนวนชิ้นที่ขาด
-                        current_0021 = int(getattr(row, '_5'))   # ยอดปัจจุบันใน 0021
-                        limit_stock = int(getattr(row, '_6'))    # เกณฑ์อนุมัติ
-                        
-                        line_msg += f"{idx}. รหัส: {row.รหัสพัสดุ}\n"
-                        line_msg += f"   {row.ชื่อพัสดุ}\n"
-                        line_msg += f"   ยอดคลัง: {current_0021} | เกณฑ์: {limit_stock}\n"
-                        line_msg += f"   ❌ ขาดอีก: {needed_qty}\n"
-                        line_msg += "----------------------------------\n"
-                    
-                    with st.spinner("กำลังส่งข้อมูลเข้าไลน์กลุ่มผู้บริหาร..."):
-                        status_code = send_line_message(line_msg, target_chat_id)
-                        if status_code == 200:
-                            st.success("✅ ส่งรายงานข้อมูลพัสดุวิกฤตเข้ากลุ่ม LINE เรียบร้อยแล้ว!")
-                        else:
-                            st.error(f"❌ ส่งข้อมูลไม่สำเร็จ (รหัสสถานะความผิดพลาดจาก LINE: {status_code}) กรุณาตรวจสอบสิทธิ์ของบอตในกลุ่ม")
         else:
             st.success(f"✅ พัสดุทั้งหมดในคลังย่อย 0021 ของคลัง **{warehouse_option}** อยู่ในระดับที่ปลอดภัยครบถ้วน")
             
