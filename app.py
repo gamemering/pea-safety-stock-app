@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import re
+import io
 from google.oauth2.service_account import Credentials
 import gspread
 import requests  # ใช้สำหรับระบบส่ง LINE
@@ -56,33 +57,72 @@ def send_line_message(message_text, target_id):
     except Exception as e:
         return str(e)
 
-# --- ส่วนที่ 1: ค้นหาไฟล์เกณฑ์ Safety Stock อัตโนมัติในโฟลเดอร์ GitHub ---
-def find_safety_stock_file():
-    for file in os.listdir('.'):
-        if file.endswith('.txt') or file.endswith('.csv'):
-            try:
-                with open(file, 'r', encoding='utf-8') as f:
-                    first_line = f.readline()
-                if 'SAP_Code' in first_line and 'Total_N3' in first_line:
-                    return file
-            except Exception:
-                continue
-    return None
-
-detected_file = find_safety_stock_file()
-
-@st.cache_data
-def load_safety_stock_from_file(file_path):
-    if file_path is not None:
-        try:
-            df = pd.read_csv(file_path, encoding='utf-8')
-            return df
-        except Exception as e:
-            st.error(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์เกณฑ์: {e}")
+# --- 🛠️ ฟังก์ชันสำหรับแกะเนื้อหาไฟล์เกณฑ์ Safety Stock จริง (แกะฟอร์แมตซ้อนหัวแถว) ---
+def parse_safety_stock_csv(file_content):
+    try:
+        raw_df = pd.read_csv(io.StringIO(file_content), header=None)
+        header_row_idx = -1
+        
+        # ค้นหาแถวที่มีคำว่า 'รหัสพัสดุ' เพื่อตั้งต้นเป็นแถวหัวข้อ
+        for idx, row in raw_df.iterrows():
+            if any('รหัสพัสดุ' in str(val) for val in row):
+                header_row_idx = idx
+                break
+        
+        if header_row_idx == -1:
             return None
-    return None
+            
+        row_labels = raw_df.iloc[header_row_idx].tolist()
+        row_codes = raw_df.iloc[header_row_idx + 1].tolist()
+        
+        cols = []
+        for i in range(len(row_labels)):
+            lbl = str(row_labels[i]).strip()
+            code = str(row_codes[i]).strip()
+            if 'รหัสพัสดุ' in lbl:
+                cols.append('SAP_Code')
+            elif 'รายการ' in lbl:
+                cols.append('Description')
+            elif 'หน่วย' in lbl:
+                cols.append('Unit')
+            elif 'ที่' in lbl and i == 0:
+                cols.append('No')
+            elif code.startswith('C') and code[1:].isdigit():  # ดึงเฉพาะรหัสคลัง เช่น C010, C130
+                cols.append(code)
+            else:
+                cols.append(f"Unused_{i}")
+                
+        raw_df.columns = cols
+        data_df = raw_df.iloc[header_row_idx + 2:].copy()
+        
+        warehouse_cols = [c for c in cols if c.startswith('C') and c[1:].isdigit()]
+        valid_cols = ['No', 'SAP_Code', 'Description', 'Unit'] + warehouse_cols
+        data_df = data_df[[c for c in valid_cols if c in data_df.columns]]
+        
+        data_df = data_df.dropna(subset=['SAP_Code'])
+        data_df['SAP_Code'] = data_df['SAP_Code'].astype(str).str.replace('.0', '', regex=False).str.strip()
+        data_df = data_df[data_df['SAP_Code'] != '']
+        
+        # ปรับค่า NaN ในทุกคลังให้เป็น 0 เพื่อป้องกันระบบคำนวณพัง
+        for col in warehouse_cols:
+            data_df[col] = pd.to_numeric(data_df[col], errors='coerce').fillna(0).astype(int)
+            
+        return data_df
+    except Exception as e:
+        st.error(f"❌ เกิดข้อผิดพลาดในการประมวลผลไฟล์เกณฑ์พัสดุ: {e}")
+        return None
 
-df_safety = load_safety_stock_from_file(detected_file)
+# --- 📥 ฟังก์ชันสำหรับดึงข้อมูลเกณฑ์จาก Google Sheets ---
+def load_safety_stock_from_sheets(client):
+    try:
+        sh = client.open(GOOGLE_SHEET_NAME)
+        worksheet = sh.worksheet("Safety_Stock_Criteria")
+        records = worksheet.get_all_records()
+        if records:
+            return pd.DataFrame(records)
+    except Exception:
+        return None
+    return None
 
 # --- ส่วนที่ 2: ฟังก์ชันสำหรับแกะเนื้อหาไฟล์ MB52 ของ SAP (Text Parser) ---
 def parse_mb52_txt(file_content):
@@ -128,13 +168,57 @@ def parse_mb52_txt(file_content):
     return df_parsed
 
 
-# เริ่มรันหน้าเว็บเมื่อไฟล์เกณฑ์พัสดุพร้อมใช้งาน
+# เชื่อมต่อระบบ Sheets ตั้งต้น
+client = get_gspread_client()
+df_safety = None
+if client is not None:
+    df_safety = load_safety_stock_from_sheets(client)
+
+# สร้างเมนูด้านซ้าย (Sidebar)
+st.sidebar.title("📁 แผงควบคุมฐานข้อมูล")
+
+# --- 🆕 ส่วนอัปโหลดไฟล์เกณฑ์อ้างอิง Safety Stock ใหม่ประจำปี ---
+st.sidebar.header("📤 1. อัปเดตเกณฑ์ Safety Stock ประจำปี")
+uploaded_safety_file = st.sidebar.file_uploader("ลากวางไฟล์เกณฑ์จริง (.csv) ที่นี่", key="uploader_master_safety")
+
+if uploaded_safety_file is not None:
+    try:
+        safety_bytes = uploaded_safety_file.getvalue()
+        try:
+            safety_string = safety_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            safety_string = safety_bytes.decode("cp874", errors="ignore")
+            
+        with st.spinner("กำลังแกะโครงสร้างไฟล์จริงและบันทึกขึ้นระบบคลาวด์ถาวร..."):
+            df_safety_parsed = parse_safety_stock_csv(safety_string)
+            if df_safety_parsed is not None and not df_safety_parsed.empty:
+                if client is not None:
+                    sh = client.open(GOOGLE_SHEET_NAME)
+                    try:
+                        ws_master = sh.worksheet("Safety_Stock_Criteria")
+                    except gspread.exceptions.WorksheetNotFound:
+                        ws_master = sh.add_worksheet(title="Safety_Stock_Criteria", rows="2000", cols="20")
+                    
+                    ws_master.clear()
+                    master_data_save = [df_safety_parsed.columns.tolist()] + df_safety_parsed.values.tolist()
+                    ws_master.update('A1', master_data_save)
+                    
+                    st.sidebar.success("✅ บันทึกเกณฑ์อ้างอิง Safety Stock ลงระบบคลาวด์ถาวรสำเร็จแล้ว!")
+                    st.cache_data.clear()
+                    st.rerun()
+            else:
+                st.sidebar.error("❌ ไฟล์ไม่ถูกต้อง หรือไม่พบหัวข้อรหัสพัสดุตามเงื่อนไข")
+    except Exception as e:
+        st.sidebar.error(f"❌ เกิดข้อผิดพลาด: {e}")
+
+
+# เช็คความพร้อมของเกณฑ์อ้างอิงก่อนเริ่มทำงานส่วนที่เหลือ
 if df_safety is not None:
-    st.sidebar.success(f"📂 ตรวจพบไฟล์เกณฑ์อัตโนมัติ: `{detected_file}`")
+    st.sidebar.markdown("---")
+    st.sidebar.header("⚙️ 2. เลือกคลังที่ต้องการตรวจสอบ")
     
-    st.sidebar.header("⚙️ เลือกคลังที่ต้องการตรวจสอบ")
-    all_columns = df_safety.columns.tolist()
-    warehouse_options = [col for col in all_columns if col not in ['No', 'Type', 'SAP_Code', 'Description', 'Unit', 'Total_N3']]
+    # ดึงรายชื่อคลังอัตโนมัติเฉพาะคอลัมน์ที่ขึ้นต้นด้วยตัว C
+    warehouse_options = [col for col in df_safety.columns if str(col).startswith('C') and str(col)[1:].isdigit()]
     
     warehouse_option = st.sidebar.selectbox(
         "เลือกพื้นที่คลังพัสดุเพื่อดูตาราง:",
@@ -143,7 +227,7 @@ if df_safety is not None:
     )
 
     st.sidebar.markdown("---")
-    st.sidebar.subheader("📥 อัปเดตยอดคลังเข้าคลาวด์ถาวร")
+    st.sidebar.subheader("📥 3. อัปเดตยอดคลังเข้าคลาวด์ถาวร")
     
     upload_target = st.sidebar.selectbox(
         "เลือกคลังปลายทางที่จะบันทึกไฟล์นี้:",
@@ -156,7 +240,7 @@ if df_safety is not None:
         key=f"uploader_{upload_target}"
     )
 
-    # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร + บันทึก Sheet สรุป + แจ้งเตือน LINE อัตโนมัติ
+    # 💾 ตรรกะการบันทึกข้อมูลคงคลังดิบ + สร้างแผ่นงานสรุปดูง่ายแยกต่างหาก + ส่ง LINE
     if uploaded_mb52 is not None:
         try:
             raw_bytes = uploaded_mb52.getvalue()
@@ -169,11 +253,9 @@ if df_safety is not None:
             
             if not df_parsed.empty:
                 with st.spinner(f"กำลังอัปเดตฐานข้อมูลถาวรของคลัง {upload_target} ลง Google Sheets..."):
-                    client = get_gspread_client()
                     if client is not None:
                         sh = client.open(GOOGLE_SHEET_NAME)
                         
-                        # 1. บันทึกข้อมูลฐานข้อมูลดิบ (c010-c130)
                         try:
                             worksheet = sh.worksheet(upload_target)
                         except gspread.exceptions.WorksheetNotFound:
@@ -184,7 +266,7 @@ if df_safety is not None:
                         worksheet.update('A1', data_to_save)
                         st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
                         
-                        # 2. สกัดข้อมูลวิกฤตไปบันทึกเป็นแผ่นงานสรุปดูง่ายแยกอีกหนึ่ง Sheet ต่างหาก 
+                        # สร้างสถิติข้อมูลวิกฤตแยกเป็นอีกหนึ่ง Sheet
                         df_safety_line = df_safety.copy()
                         df_parsed_line = df_parsed.copy()
                         df_safety_line['SAP_Code'] = df_safety_line['SAP_Code'].astype(str).str.strip()
@@ -219,7 +301,7 @@ if df_safety is not None:
                         st.sidebar.success(f"📊 อัปเดตแผ่นงานสรุป **{summary_ws_title}** แยกต่างหากเรียบร้อย!")
                         st.cache_data.clear() 
                         
-                        # 3. ส่ง LINE แจ้งเตือนอัตโนมัติ + แนบลิงก์ Google Sheets เข้าไปท้ายข้อความ
+                        # ส่ง LINE แจ้งเตือนอัตโนมัติ
                         if "line_group_id" in st.secrets:
                             if not df_shortage_auto.empty:
                                 total_shortage = len(df_shortage_auto)
@@ -254,19 +336,18 @@ if df_safety is not None:
         except Exception as e:
             st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูลลงแผ่นงาน: {e}")
 
-    # --- 🔄 ปุ่มส่งผลสรุปอีกครั้ง พร้อมคำอธิบายสำหรับพนักงาน (แทนที่เครื่องมือทดสอบเดิม) ---
+    # --- 🔄 ปุ่มส่งผลสรุปอีกครั้ง พร้อมคำอธิบายสำหรับพนักงาน ---
     st.sidebar.markdown("---")
     st.sidebar.subheader("📢 ส่งรายงานสรุปซ้ำเข้า LINE")
     st.sidebar.info(
         "💡 **คำอธิบายระบบสำหรับพนักงาน:**\n\n"
         "เมื่อมีการลากวางไฟล์เพื่ออัปเดตยอดคงเหลือด้านบน ระบบจะคำนวณและส่งข้อความแจ้งเตือนเข้า LINE กลุ่มผู้บริหารให้โดยอัตโนมัติทันทีอยู่แล้ว\n\n"
-        "🚨 **แต่ในกรณีที่ต้องการส่งข้อมูลผลสรุปของคลังพัสดุที่เลือกอยู่ ณ ปัจจุบัน เข้ากลุ่ม LINE อีกครั้ง** (เช่น สมาชิกกลุ่มไลน์อ่านไม่ทัน หรือต้องการแจ้งย้ำ) "
+        "🚨 **แต่ในกรณีที่ต้องการส่งข้อมูลผลสรุปของคลังพัสดุที่เลือกอยู่ ณ ปัจจุบัน เข้ากลุ่ม LINE อีกครั้ง** "
         "สามารถกดปุ่มด้านล่างนี้เพื่อสั่งส่งซ้ำได้ทันทีครับ"
     )
     
     if st.sidebar.button("🔄 สั่งส่งผลสรุปเข้า LINE อีกครั้ง", key="resend_summary_to_line"):
         with st.spinner(f"กำลังดึงข้อมูลล่าสุดและเตรียมส่งไลน์คลัง {warehouse_option}..."):
-            client = get_gspread_client()
             if client is not None:
                 try:
                     sh = client.open(GOOGLE_SHEET_NAME)
@@ -321,19 +402,14 @@ if df_safety is not None:
                                 status_code = send_line_message(line_msg, st.secrets["line_group_id"])
                                 if status_code == 200:
                                     st.sidebar.success(f"📱 ส่งสถานะปกติของคลัง **{warehouse_option}** เข้ากลุ่ม LINE สำเร็จ!")
-                        else:
-                            st.sidebar.error("❌ ไม่พบรหัส line_group_id ในระบบความลับหลังบ้าน")
-                    else:
-                        st.sidebar.warning(f"⚠️ คลัง **{warehouse_option}** ยังไม่มีฐานข้อมูลในระบบเลยส่งซ้ำไม่ได้ (กรุณาลากวางไฟล์ MB52 เพื่อตั้งต้นข้อมูก่อน)")
                 except Exception as e:
                     st.sidebar.error(f"❌ ระบบเกิดข้อผิดพลาดในการดึงข้อมูลส่งไลน์: {e}")
 
 
-    # --- ส่วนที่ 4: การดึงดาต้าจาก Google Sheets มาคำนวณโชว์ผล ---
+    # --- ส่วนที่ 4: การดึงดาต้าจาก Google Sheets มาคำนวณโชว์ผลหน้าเว็บ ---
     st.write(f"📊 กำลังแสดงยอดเปรียบเทียบคลัง: **{warehouse_option}**")
     
     df_mb52_clean = None
-    client = get_gspread_client()
     if client is not None:
         try:
             sh = client.open(GOOGLE_SHEET_NAME)
@@ -347,7 +423,6 @@ if df_safety is not None:
         except Exception:
             df_mb52_clean = None
 
-    # เคลียร์ปัญหาเกณฑ์พัสดุใน GitHub มีค่าว่างเปล่า (NaN) ป้องกันการพังในทุก ๆ จุดคำนวณ
     df_safety[warehouse_option] = df_safety[warehouse_option].fillna(0)
 
     if df_mb52_clean is not None and not df_mb52_clean.empty:
@@ -399,4 +474,4 @@ if df_safety is not None:
         st.dataframe(df_blank.style.format({'อนุมัติ safety stock': '{:,}'}), use_container_width=True, hide_index=True)
 
 else:
-    st.error("❌ ไม่พบไฟล์ฐานข้อมูลเกณฑ์พัสดุ (Safety Stock) ในระบบ")
+    st.info("⚠️ ยังไม่พบเกณฑ์อ้างอิง Safety Stock ในระบบคลาวด์ กรุณาลากวางไฟล์เกณฑ์จริง (.csv) ที่แถบควบคุมด้านซ้ายก่อนเพื่อเปิดใช้งานหน้าเว็บหลัก")
