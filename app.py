@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import re
 import io
+import traceback  # ➕ เพิ่มไลบรารีสำหรับสาวไส้ Error ตามคำขอ
 from google.oauth2.service_account import Credentials
 import gspread
 import requests
@@ -22,15 +23,16 @@ def get_gspread_client():
         return gspread.authorize(creds)
     except Exception as e:
         st.error(f"❌ ระบบความปลอดภัยปฏิเสธการเชื่อมต่อ (Secrets Error): {e}")
+        st.code(traceback.format_exc(), language='python')
         return None
 
 # --- 🛠️ 1.1 ฟังก์ชันเกราะป้องกัน gspread สลับเวอร์ชัน ---
 def safe_update_sheet(sheet, data, range_name="A1"):
     try:
-        # สำหรับ gspread เวอร์ชัน 6.0.0 ขึ้นไป
-        sheet.update(data, range_name)
-    except Exception:
-        # สำหรับ gspread เวอร์ชันเก่า
+        # ลองอัปเดตแบบระบุ kwargs ป้องกันการสลับตำแหน่งของเวอร์ชันใหม่
+        sheet.update(values=data, range_name=range_name)
+    except TypeError:
+        # ท่ามาตรฐานสำหรับ gspread เวอร์ชันเก่า
         sheet.update(range_name, data)
 
 # --- 2. ฟังก์ชันส่ง LINE ---
@@ -66,7 +68,6 @@ def parse_safety_stock_csv(file_content):
         counter = 1
         for idx, row in raw_df.iterrows():
             sap_code = str(row[sap_col_idx]).strip()
-            # กรองเฉพาะแถวรหัสพัสดุ 10 หลัก
             if re.match(r'^\d{10}$', sap_code):
                 row_data = {
                     'No': counter,
@@ -91,6 +92,7 @@ def parse_safety_stock_csv(file_content):
         return processed_df[final_cols]
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาดในการประมวลผลไฟล์เกณฑ์: {e}")
+        st.code(traceback.format_exc(), language='python')
         return None
 
 # --- 4. ดึงข้อมูลเกณฑ์จาก Google Sheets ---
@@ -155,7 +157,6 @@ if uploaded_safety_file:
                 master_data_save = [df_safety_parsed.columns.tolist()] + df_safety_parsed.fillna('').values.tolist()
                 ws_master.resize(rows=max(ws_master.row_count, len(master_data_save)), cols=max(ws_master.col_count, len(master_data_save[0])))
                 
-                # 🛡️ ใช้ฟังก์ชันเกราะป้องกันอัปเดตข้อมูล
                 safe_update_sheet(ws_master, master_data_save)
                 
                 st.sidebar.success("✅ บันทึกเกณฑ์อ้างอิง Safety Stock ลงระบบคลาวด์ถาวรสำเร็จแล้ว!")
@@ -163,6 +164,8 @@ if uploaded_safety_file:
                 st.rerun()
     except Exception as e:
         st.sidebar.error(f"❌ เกิดข้อผิดพลาดในระบบส่งฐานข้อมูล: {e}")
+        # 🎯 หัวใจหลักของการจับบั๊ก: แสดงโค้ด Error ทุกบรรทัดบน Sidebar
+        st.sidebar.code(traceback.format_exc(), language='python')
 
 if df_safety is not None and not df_safety.empty:
     st.sidebar.markdown("---")
@@ -185,70 +188,70 @@ if df_safety is not None and not df_safety.empty:
         df_parsed = parse_mb52_txt(string_data)
         if not df_parsed.empty:
             with st.spinner(f"กำลังอัปเดตฐานข้อมูลถาวรของคลัง {upload_target}..."):
-                sh = client.open(GOOGLE_SHEET_NAME)
                 try:
-                    worksheet = sh.worksheet(upload_target)
-                except gspread.exceptions.WorksheetNotFound:
-                    worksheet = sh.add_worksheet(title=upload_target, rows="100", cols="5")
-                worksheet.clear()
-                data_to_save = [df_parsed.columns.tolist()] + df_parsed.values.tolist()
-                worksheet.resize(rows=max(worksheet.row_count, len(data_to_save)), cols=max(worksheet.col_count, len(data_to_save[0])))
-                
-                # 🛡️ ใช้ฟังก์ชันเกราะป้องกัน
-                safe_update_sheet(worksheet, data_to_save)
-                
-                st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
+                    sh = client.open(GOOGLE_SHEET_NAME)
+                    try:
+                        worksheet = sh.worksheet(upload_target)
+                    except gspread.exceptions.WorksheetNotFound:
+                        worksheet = sh.add_worksheet(title=upload_target, rows="100", cols="5")
+                    worksheet.clear()
+                    data_to_save = [df_parsed.columns.tolist()] + df_parsed.values.tolist()
+                    worksheet.resize(rows=max(worksheet.row_count, len(data_to_save)), cols=max(worksheet.col_count, len(data_to_save[0])))
+                    
+                    safe_update_sheet(worksheet, data_to_save)
+                    st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
 
-                # --- วิเคราะห์ผลต่างและสร้างชีตสรุป ---
-                df_safety_line = df_safety.copy()
-                df_parsed_line = df_parsed.copy()
-                df_safety_line['SAP_Code'] = df_safety_line['SAP_Code'].astype(str).str.strip()
-                df_parsed_line['SAP_Code'] = df_parsed_line['SAP_Code'].astype(str).str.strip()
-                
-                df_merge_auto = pd.merge(df_safety_line, df_parsed_line, on='SAP_Code', how='left')
-                df_merge_auto['Qty_0021'] = pd.to_numeric(df_merge_auto['Qty_0021'], errors='coerce').fillna(0)
-                df_merge_auto[upload_target] = pd.to_numeric(df_merge_auto[upload_target], errors='coerce').fillna(0)
-                df_merge_auto['คงเหลือ_0021'] = df_merge_auto['Qty_0021'] - df_merge_auto[upload_target]
-                df_shortage_auto = df_merge_auto[df_merge_auto['คงเหลือ_0021'] < 0]
+                    # --- วิเคราะห์ผลต่างและสร้างชีตสรุป ---
+                    df_safety_line = df_safety.copy()
+                    df_parsed_line = df_parsed.copy()
+                    df_safety_line['SAP_Code'] = df_safety_line['SAP_Code'].astype(str).str.strip()
+                    df_parsed_line['SAP_Code'] = df_parsed_line['SAP_Code'].astype(str).str.strip()
+                    
+                    df_merge_auto = pd.merge(df_safety_line, df_parsed_line, on='SAP_Code', how='left')
+                    df_merge_auto['Qty_0021'] = pd.to_numeric(df_merge_auto['Qty_0021'], errors='coerce').fillna(0)
+                    df_merge_auto[upload_target] = pd.to_numeric(df_merge_auto[upload_target], errors='coerce').fillna(0)
+                    df_merge_auto['คงเหลือ_0021'] = df_merge_auto['Qty_0021'] - df_merge_auto[upload_target]
+                    df_shortage_auto = df_merge_auto[df_merge_auto['คงเหลือ_0021'] < 0]
 
-                summary_ws_title = f"สรุป_{upload_target}"
-                try:
-                    summary_worksheet = sh.worksheet(summary_ws_title)
-                except gspread.exceptions.WorksheetNotFound:
-                    summary_worksheet = sh.add_worksheet(title=summary_ws_title, rows="100", cols="5")
-                summary_worksheet.clear()
-                
-                if not df_shortage_auto.empty:
-                    df_summary_sheet = pd.DataFrame({
-                        'รหัสพัสดุ': df_shortage_auto['SAP_Code'],
-                        'ชื่อพัสดุ': df_shortage_auto['Description'],
-                        'ยอดคงคลังย่อย 0021': df_shortage_auto['Qty_0021'].astype(int),
-                        'เกณฑ์ Safety Stock': df_shortage_auto[upload_target].astype(int),
-                        'จำนวนที่ขาด (ผลต่าง)': (df_shortage_auto[upload_target] - df_shortage_auto['Qty_0021']).astype(int)
-                    })
-                    summary_data_to_save = [df_summary_sheet.columns.tolist()] + df_summary_sheet.values.tolist()
-                else:
-                    summary_data_to_save = [["สถานะคลัง", "✅ ปลอดภัยครบถ้วน ไม่มีพัสดุต่ำกว่าเกณฑ์"]]
-                
-                summary_worksheet.resize(rows=max(summary_worksheet.row_count, len(summary_data_to_save)), cols=max(summary_worksheet.col_count, len(summary_data_to_save[0])))
-                
-                # 🛡️ ใช้ฟังก์ชันเกราะป้องกัน
-                safe_update_sheet(summary_worksheet, summary_data_to_save)
-                
-                st.cache_data.clear()
+                    summary_ws_title = f"สรุป_{upload_target}"
+                    try:
+                        summary_worksheet = sh.worksheet(summary_ws_title)
+                    except gspread.exceptions.WorksheetNotFound:
+                        summary_worksheet = sh.add_worksheet(title=summary_ws_title, rows="100", cols="5")
+                    summary_worksheet.clear()
+                    
+                    if not df_shortage_auto.empty:
+                        df_summary_sheet = pd.DataFrame({
+                            'รหัสพัสดุ': df_shortage_auto['SAP_Code'],
+                            'ชื่อพัสดุ': df_shortage_auto['Description'],
+                            'ยอดคงคลังย่อย 0021': df_shortage_auto['Qty_0021'].astype(int),
+                            'เกณฑ์ Safety Stock': df_shortage_auto[upload_target].astype(int),
+                            'จำนวนที่ขาด (ผลต่าง)': (df_shortage_auto[upload_target] - df_shortage_auto['Qty_0021']).astype(int)
+                        })
+                        summary_data_to_save = [df_summary_sheet.columns.tolist()] + df_summary_sheet.values.tolist()
+                    else:
+                        summary_data_to_save = [["สถานะคลัง", "✅ ปลอดภัยครบถ้วน ไม่มีพัสดุต่ำกว่าเกณฑ์"]]
+                    
+                    summary_worksheet.resize(rows=max(summary_worksheet.row_count, len(summary_data_to_save)), cols=max(summary_worksheet.col_count, len(summary_data_to_save[0])))
+                    safe_update_sheet(summary_worksheet, summary_data_to_save)
+                    st.cache_data.clear()
 
-                # --- ส่ง LINE อัตโนมัติ ---
-                if "line_group_id" in st.secrets and not df_shortage_auto.empty:
-                    total_shortage = len(df_shortage_auto)
-                    line_msg = f"🚨 [รายงานแจ้งเตือนพัสดุต่ำกว่าเกณฑ์]\n📊 พื้นที่คลัง: {upload_target}\n⚠️ รายการวิกฤต: {total_shortage} รายการ\n\n"
-                    for idx, row in enumerate(df_shortage_auto.iterrows(), 1):
-                        data = row[1]
-                        line_msg += f"{idx}. {data['SAP_Code']} - {data['Description']}\n   ยอด: {int(data['Qty_0021'])} | เกณฑ์: {int(data[upload_target])} | ❌ ขาด: {int(data[upload_target] - data['Qty_0021'])}\n---\n"
-                        if idx >= 15:
-                            line_msg += f"🔺 มีรายการต่ำกว่าเกณฑ์อีก {total_shortage - 15} รายการ\n"
-                            break
-                    line_msg += f"\n🟢 ดูตารางสรุปทั้งหมดได้ที่นี่:\n{sh.url}"
-                    send_line_message(line_msg, st.secrets["line_group_id"])
+                    # --- ส่ง LINE อัตโนมัติ ---
+                    if "line_group_id" in st.secrets and not df_shortage_auto.empty:
+                        total_shortage = len(df_shortage_auto)
+                        line_msg = f"🚨 [รายงานแจ้งเตือนพัสดุต่ำกว่าเกณฑ์]\n📊 พื้นที่คลัง: {upload_target}\n⚠️ รายการวิกฤต: {total_shortage} รายการ\n\n"
+                        for idx, row in enumerate(df_shortage_auto.iterrows(), 1):
+                            data = row[1]
+                            line_msg += f"{idx}. {data['SAP_Code']} - {data['Description']}\n   ยอด: {int(data['Qty_0021'])} | เกณฑ์: {int(data[upload_target])} | ❌ ขาด: {int(data[upload_target] - data['Qty_0021'])}\n---\n"
+                            if idx >= 15:
+                                line_msg += f"🔺 มีรายการต่ำกว่าเกณฑ์อีก {total_shortage - 15} รายการ\n"
+                                break
+                        line_msg += f"\n🟢 ดูตารางสรุปทั้งหมดได้ที่นี่:\n{sh.url}"
+                        send_line_message(line_msg, st.secrets["line_group_id"])
+                        
+                except Exception as e:
+                    st.sidebar.error(f"❌ เกิดข้อผิดพลาดตอนอัปเดตไฟล์ MB52: {e}")
+                    st.sidebar.code(traceback.format_exc(), language='python')
 
     # --- ปุ่มส่ง LINE ด้วยมือ ---
     st.sidebar.markdown("---")
@@ -291,6 +294,7 @@ if df_safety is not None and not df_safety.empty:
                             st.sidebar.success(f"📱 ส่งสถานะปกติเข้า LINE สำเร็จ!")
             except Exception as e:
                 st.sidebar.error(f"❌ ดึงข้อมูลส่งไลน์ไม่สำเร็จ: {e}")
+                st.sidebar.code(traceback.format_exc(), language='python')
 
     # --- โชว์ตารางบนหน้าเว็บหลัก ---
     st.write(f"📊 กำลังแสดงยอดเปรียบเทียบคลัง: **{warehouse_option}**")
@@ -333,5 +337,5 @@ if df_safety is not None and not df_safety.empty:
     else:
         st.info(f"📊 ยังไม่มีข้อมูลดิบของคลัง **{warehouse_option}** (กรุณาเลือกคลังด้านซ้ายและอัปโหลดไฟล์ MB52)")
 else:
-    # 🎯 เปลี่ยนข้อความแจ้งเตือนตามที่คุณต้องการเป๊ะๆ
+    # ข้อความแจ้งเตือนเป๊ะๆ ตามคำขอ
     st.info("⚠️ ยังไม่พบเกณฑ์อ้างอิง Safety Stock ในระบบคลาวด์ กรุณาลากวางไฟล์เกณฑ์จริง (.csv) ที่แถบควบคุมด้านซ้ายก่อนเพื่อเปิดใช้งานหน้าเว็บหลัก")
