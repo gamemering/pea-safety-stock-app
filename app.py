@@ -35,29 +35,31 @@ def get_gspread_client():
         st.code(traceback.format_exc(), language='python')
         return None
 
-# --- 🛠️ 1.1 ฟังก์ชันอัปเดต Google Sheets แบบดิบ (RAW) สยบ Error ---
-def safe_update_sheet(sheet, data, range_name="A1"):
-    # ทำความสะอาดข้อมูลทุกเซลล์ให้เป็น Python Type บริสุทธิ์
-    clean_data = []
-    for row in data:
-        clean_row = []
-        for val in row:
-            if pd.isna(val):
-                clean_row.append("")
-            elif isinstance(val, (int, float)):
-                if val == float('inf') or val == float('-inf'):
-                    clean_row.append("")
-                else:
-                    clean_row.append(int(val) if float(val).is_integer() else float(val))
-            else:
-                clean_row.append(str(val))
-        clean_data.append(clean_row)
-        
+# --- 🛠️ 1.1 ฟังก์ชันอัปเดต Google Sheets แบบหุ้มเกราะไทเทเนียม ---
+def safe_update_sheet(sheet, df, range_name="A1"):
     try:
-        # บังคับ RAW ป้องกัน Google Sheets เอาเครื่องหมาย - หรือ = ไปแปลเป็นสูตรจนพัง
-        sheet.update(values=clean_data, range_name=range_name, value_input_option="RAW")
-    except TypeError:
-        sheet.update(range_name, clean_data, value_input_option="RAW")
+        # 1. แปลง DataFrame เป็น String ทั้งหมด และล้างค่าแปลกปลอม (NaN, Inf) ออกให้หมดจด
+        df_str = df.astype(str).replace(['nan', 'NaN', 'None', '<NA>', 'inf', '-inf'], '')
+        data = [df_str.columns.tolist()] + df_str.values.tolist()
+        
+        # 2. เช็คขนาดตารางและขยายล่วงหน้า (ป้องกัน Error ตารางเต็ม)
+        req_rows = len(data)
+        req_cols = len(data[0]) if req_rows > 0 else 1
+        
+        cur_rows = int(sheet.row_count) if sheet.row_count else 1000
+        cur_cols = int(sheet.col_count) if sheet.col_count else 20
+        
+        if req_rows > cur_rows or req_cols > cur_cols:
+            # ขยายเผื่อไว้เลย 100 แถว ป้องกัน Out of bounds
+            sheet.resize(rows=max(cur_rows, req_rows + 100), cols=max(cur_cols, req_cols + 10))
+        
+        # 3. อัปเดตข้อมูลแบบ USER_ENTERED ให้ Google Sheets รับบทเป็นคนจัดการตัวเลขเอง
+        try:
+            sheet.update(values=data, range_name=range_name, value_input_option="USER_ENTERED")
+        except TypeError:
+            sheet.update(range_name, data, value_input_option="USER_ENTERED")
+    except Exception as e:
+        raise Exception(f"Failed in safe_update_sheet: {str(e)}")
 
 # --- 2. ฟังก์ชันส่ง LINE ---
 def send_line_message(message_text, target_id):
@@ -178,13 +180,13 @@ if uploaded_safety_file:
                 try:
                     ws_master = sh.worksheet("Safety_Stock_Criteria")
                 except gspread.exceptions.WorksheetNotFound:
-                    ws_master = sh.add_worksheet(title="Safety_Stock_Criteria", rows="100", cols="20")
+                    # 🛠️ ซ่อมบั๊กใหญ่: บังคับใช้ค่า Integer (1000) ไม่ใช้ String ป้องกัน API Google งง
+                    ws_master = sh.add_worksheet(title="Safety_Stock_Criteria", rows=2000, cols=30)
                 
                 ws_master.clear()
-                master_data_save = [df_safety_parsed.columns.tolist()] + df_safety_parsed.fillna('').values.tolist()
-                ws_master.resize(rows=max(ws_master.row_count, len(master_data_save)), cols=max(ws_master.col_count, len(master_data_save[0])))
                 
-                safe_update_sheet(ws_master, master_data_save)
+                # 🛡️ โยน DataFrame เข้าฟังก์ชันเกราะไทเทเนียมให้จัดการรวบยอด
+                safe_update_sheet(ws_master, df_safety_parsed)
                 
                 st.sidebar.success("✅ บันทึกเกณฑ์อ้างอิง Safety Stock ลงระบบคลาวด์ถาวรสำเร็จแล้ว!")
                 st.cache_data.clear()
@@ -220,12 +222,10 @@ if df_safety is not None and not df_safety.empty:
                     try:
                         worksheet = sh.worksheet(upload_target)
                     except gspread.exceptions.WorksheetNotFound:
-                        worksheet = sh.add_worksheet(title=upload_target, rows="100", cols="5")
-                    worksheet.clear()
-                    data_to_save = [df_parsed.columns.tolist()] + df_parsed.values.tolist()
-                    worksheet.resize(rows=max(worksheet.row_count, len(data_to_save)), cols=max(worksheet.col_count, len(data_to_save[0])))
+                        worksheet = sh.add_worksheet(title=upload_target, rows=1500, cols=20)
                     
-                    safe_update_sheet(worksheet, data_to_save)
+                    worksheet.clear()
+                    safe_update_sheet(worksheet, df_parsed)
                     st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
 
                     # --- วิเคราะห์ผลต่างและสร้างชีตสรุป ---
@@ -242,7 +242,7 @@ if df_safety is not None and not df_safety.empty:
                     try:
                         summary_worksheet = sh.worksheet(summary_ws_title)
                     except gspread.exceptions.WorksheetNotFound:
-                        summary_worksheet = sh.add_worksheet(title=summary_ws_title, rows="100", cols="5")
+                        summary_worksheet = sh.add_worksheet(title=summary_ws_title, rows=500, cols=10)
                     summary_worksheet.clear()
                     
                     if not df_shortage_auto.empty:
@@ -253,12 +253,11 @@ if df_safety is not None and not df_safety.empty:
                             'เกณฑ์ Safety Stock': df_shortage_auto[upload_target].astype(int),
                             'จำนวนที่ขาด (ผลต่าง)': (df_shortage_auto[upload_target] - df_shortage_auto['Qty_0021']).astype(int)
                         })
-                        summary_data_to_save = [df_summary_sheet.columns.tolist()] + df_summary_sheet.values.tolist()
+                        safe_update_sheet(summary_worksheet, df_summary_sheet)
                     else:
-                        summary_data_to_save = [["สถานะคลัง", "✅ ปลอดภัยครบถ้วน ไม่มีพัสดุต่ำกว่าเกณฑ์"]]
-                    
-                    summary_worksheet.resize(rows=max(summary_worksheet.row_count, len(summary_data_to_save)), cols=max(summary_worksheet.col_count, len(summary_data_to_save[0])))
-                    safe_update_sheet(summary_worksheet, summary_data_to_save)
+                        empty_df = pd.DataFrame([["✅ ปลอดภัยครบถ้วน ไม่มีพัสดุต่ำกว่าเกณฑ์"]], columns=["สถานะคลัง"])
+                        safe_update_sheet(summary_worksheet, empty_df)
+                        
                     st.cache_data.clear()
 
                     # --- ส่ง LINE อัตโนมัติ ---
