@@ -28,7 +28,7 @@ def get_gspread_client():
         client = gspread.authorize(creds)
         return client
     except Exception as e:
-        st.error(f"❌ ระบบความปลอดภัยปฏิเสธการเชื่อมต่อ (Secrets Error): {e}")
+        st.error(f"❌ ระบบความปลอดภัยปฏิเสชการเชื่อมต่อ (Secrets Error): {e}")
         return None
 
 # --- 📱 ฟังก์ชันสำหรับส่งข้อความผ่าน LINE Messaging API ---
@@ -57,19 +57,22 @@ def send_line_message(message_text, target_id):
     except Exception as e:
         return str(e)
 
-# --- 🛠️ ฟังก์ชันสำหรับแกะเนื้อหาไฟล์เกณฑ์ Safety Stock จริง (เวอร์ชันอัปเกรดป้องกันค่าว่างล่ม) ---
+# --- 🛠️ ฟังก์ชันสำหรับแกะเนื้อหาไฟล์เกณฑ์ Safety Stock จริง (เวอร์ชันแกนเหล็ก ป้องกันคอมมาเหลื่อมล้ำ) ---
 def parse_safety_stock_csv(file_content):
     try:
-        raw_df = pd.read_csv(io.StringIO(file_content), header=None)
-        header_row_idx = -1
+        # 🛡️ หมัดเด็ดป้องกันพัง: บังคับให้ Pandas จองพื้นที่ตารางไว้ 100 คอลัมน์เท่ากันทุกแถว ป้องกันปัญหาช่องยาวไม่เท่ากันจาก Excel
+        raw_df = pd.read_csv(io.StringIO(file_content), header=None, names=list(range(100)), dtype=str)
+        raw_df = raw_df.fillna('')
         
-        # ค้นหาแถวที่มีคำว่า 'รหัสพัสดุ' เพื่อตั้งต้นเป็นแถวหัวข้อ
+        header_row_idx = -1
+        # ค้นหาแถวที่มีคำว่า 'รหัสพัสดุ' เพื่อตั้งต้นเป็นแถวหัวข้อคลัง
         for idx, row in raw_df.iterrows():
             if any('รหัสพัสดุ' in str(val) for val in row):
                 header_row_idx = idx
                 break
         
         if header_row_idx == -1:
+            st.error("❌ รูปแบบไฟล์ไม่ถูกต้อง: ไม่พบแถวที่มีคำว่า 'รหัสพัสดุ' กรุณาตรวจสอบไฟล์อ้างอิง")
             return None
             
         row_labels = raw_df.iloc[header_row_idx].tolist()
@@ -87,7 +90,7 @@ def parse_safety_stock_csv(file_content):
                 cols.append('Unit')
             elif 'ที่' in lbl and i == 0:
                 cols.append('No')
-            elif code.startswith('C') and code[1:].isdigit():  # ดึงรหัสคลัง เช่น C010, C130
+            elif code.startswith('C') and code[1:].isdigit():  # ตะครุบรหัสคลัง เช่น C010, C130
                 cols.append(code)
             else:
                 cols.append(f"Unused_{i}")
@@ -99,11 +102,13 @@ def parse_safety_stock_csv(file_content):
         valid_cols = ['No', 'SAP_Code', 'Description', 'Unit'] + warehouse_cols
         data_df = data_df[[c for c in valid_cols if c in data_df.columns]]
         
-        data_df = data_df.dropna(subset=['SAP_Code'])
+        # คลีนข้อมูลรหัสพัสดุและเอา .0 ออก (ถ้าติดมา)
         data_df['SAP_Code'] = data_df['SAP_Code'].astype(str).str.replace('.0', '', regex=False).str.strip()
-        data_df = data_df[data_df['SAP_Code'] != '']
         
-        # ปรับค่าทุกคลังให้เป็นตัวเลขอัจฉริยะ ป้องกันข้อความว่างเปล่าทำระบบพัง
+        # 🎯 กรองเอาเฉพาะแถวที่เป็นรหัสพัสดุตัวเลขล้วน (ตัดแถวหัวข้อกลุ่มคอนกรีต/แถวว่างทิ้งอัตโนมัติ)
+        data_df = data_df[data_df['SAP_Code'].str.match(r'^\d+$', na=False)]
+        
+        # ปรับค่าของทุกคลังให้เป็นตัวเลขจำนวนเต็มคลีน ๆ
         for col in warehouse_cols:
             data_df[col] = pd.to_numeric(data_df[col], errors='coerce').fillna(0).astype(int)
             
@@ -201,7 +206,7 @@ if uploaded_safety_file is not None:
                     
                     ws_master.clear()
                     
-                    # 🛠️ ซ่อมจุดบั๊กวิกฤต: เคลียร์ NaN ทั้งหมดให้เป็นค่าคลีนก่อนส่งขึ้น Google Sheets ป้องกันระบบ JSON หลังบ้านพัง
+                    # คลีนข้อมูล NaN ทั้งหมดให้เป็นค่าว่างธรรมดาก่อนยิงขึ้น Google Sheets
                     df_safety_parsed = df_safety_parsed.fillna('')
                     
                     master_data_save = [df_safety_parsed.columns.tolist()] + df_safety_parsed.values.tolist()
@@ -211,9 +216,9 @@ if uploaded_safety_file is not None:
                     st.cache_data.clear()
                     st.rerun()
             else:
-                st.sidebar.error("❌ ไฟล์ไม่ถูกต้อง หรือไม่พบหัวข้อรหัสพัสดุตามเงื่อนไข")
+                st.sidebar.error("❌ ไฟล์ที่อัปโหลดไม่ตรงตามเงื่อนไขหัวตารางพัสดุ")
     except Exception as e:
-        st.sidebar.error(f"❌ เกิดข้อผิดพลาด: {e}")
+        st.sidebar.error(f"❌ เกิดข้อผิดพลาดในระบบส่งฐานข้อมูล: {e}")
 
 
 # เช็คความพร้อมของเกณฑ์อ้างอิงก่อนเริ่มทำงานส่วนที่เหลือ
@@ -221,7 +226,7 @@ if df_safety is not None and not df_safety.empty:
     st.sidebar.markdown("---")
     st.sidebar.header("⚙️ 2. เลือกคลังที่ต้องการตรวจสอบ")
     
-    # ดึงรายชื่อคลังอัตโนมัติเฉพาะคอลัมน์ที่ขึ้นต้นด้วยตัว C
+    # ดึงรายชื่อคลังอัตโนมัติเฉพาะคอลัมน์ที่ขึ้นต้นด้วยตัว C เท่านั้น
     warehouse_options = [col for col in df_safety.columns if str(col).startswith('C') and str(col)[1:].isdigit()]
     
     warehouse_option = st.sidebar.selectbox(
@@ -431,7 +436,7 @@ if df_safety is not None and not df_safety.empty:
         except Exception:
             df_mb52_clean = None
 
-    # 🛠️ ซ่อมจุดบั๊ก: ป้องกันค่าว่างข้อความทำระบบคำนวณหน้าเว็บล่ม
+    # แปลงข้อมูลฝั่งเกณฑ์ให้พร้อมคำนวณ
     df_safety[warehouse_option] = pd.to_numeric(df_safety[warehouse_option], errors='coerce').fillna(0).astype(int)
 
     if df_mb52_clean is not None and not df_mb52_clean.empty:
@@ -449,7 +454,6 @@ if df_safety is not None and not df_safety.empty:
         df_result['จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)'] = df_merge['Actual_Qty'].round(0).astype(int)
         df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] = df_merge['Qty_0021'].round(0).astype(int)
         
-        # 🛠️ ป้องกันการพังเวลาเรียกใช้งานตาราง
         df_result['อนุมัติ safety stock'] = pd.to_numeric(df_merge[warehouse_option], errors='coerce').fillna(0).astype(int)
         df_result['คงเหลือ (ผลต่าง 0021)'] = df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] - df_result['อนุมัติ safety stock']
 
