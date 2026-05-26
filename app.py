@@ -15,7 +15,7 @@ st.subheader("เปรียบเทียบเกณฑ์อนุมัต
 
 GOOGLE_SHEET_NAME = "pea_safety_stock_db"
 
-# --- 🛡️ ฟังก์ชันเกราะป้องกันการแปลงตัวเลข ---
+# --- 🛡️ ฟังก์ชันแปลงตัวเลข ---
 def to_int_safe(val):
     try:
         if pd.isna(val): 
@@ -35,29 +35,41 @@ def get_gspread_client():
         st.code(traceback.format_exc(), language='python')
         return None
 
-# --- 🛠️ 1.1 ฟังก์ชันอัปเดต Google Sheets แบบหุ้มเกราะไทเทเนียม ---
+# --- 🛠️ 1.1 ฟังก์ชันอัปเดต Google Sheets แบบดักจับอักขระอันตราย ---
 def safe_update_sheet(sheet, df, range_name="A1"):
     try:
-        # 1. แปลง DataFrame เป็น String ทั้งหมด และล้างค่าแปลกปลอม (NaN, Inf) ออกให้หมดจด
+        # 1. แปลง DataFrame เป็น String และล้างค่าแปลกปลอม
         df_str = df.astype(str).replace(['nan', 'NaN', 'None', '<NA>', 'inf', '-inf'], '')
-        data = [df_str.columns.tolist()] + df_str.values.tolist()
+        raw_data = [df_str.columns.tolist()] + df_str.values.tolist()
         
-        # 2. เช็คขนาดตารางและขยายล่วงหน้า (ป้องกัน Error ตารางเต็ม)
-        req_rows = len(data)
-        req_cols = len(data[0]) if req_rows > 0 else 1
+        # 2. 🛡️ สแกนดักจับอักขระอันตราย (=, +, -) ที่ทำให้ Sheets คิดว่าเป็นสูตร
+        clean_data = []
+        for row in raw_data:
+            clean_row = []
+            for val in row:
+                val_str = str(val).strip()
+                # ถ้าข้อความขึ้นต้นด้วย = ให้เติม ' นำหน้าตามที่ Google Sheets แนะนำเป๊ะๆ
+                if val_str.startswith(('=', '+', '-')):
+                    clean_row.append(f"'{val_str}")
+                else:
+                    clean_row.append(val_str)
+            clean_data.append(clean_row)
+            
+        # 3. เช็คขนาดตารางและขยายล่วงหน้า (ป้องกัน Error ตารางเต็ม)
+        req_rows = len(clean_data)
+        req_cols = len(clean_data[0]) if req_rows > 0 else 1
         
         cur_rows = int(sheet.row_count) if sheet.row_count else 1000
         cur_cols = int(sheet.col_count) if sheet.col_count else 20
         
         if req_rows > cur_rows or req_cols > cur_cols:
-            # ขยายเผื่อไว้เลย 100 แถว ป้องกัน Out of bounds
             sheet.resize(rows=max(cur_rows, req_rows + 100), cols=max(cur_cols, req_cols + 10))
         
-        # 3. อัปเดตข้อมูลแบบ USER_ENTERED ให้ Google Sheets รับบทเป็นคนจัดการตัวเลขเอง
+        # 4. อัปเดตข้อมูลแบบ USER_ENTERED
         try:
-            sheet.update(values=data, range_name=range_name, value_input_option="USER_ENTERED")
+            sheet.update(values=clean_data, range_name=range_name, value_input_option="USER_ENTERED")
         except TypeError:
-            sheet.update(range_name, data, value_input_option="USER_ENTERED")
+            sheet.update(range_name, clean_data, value_input_option="USER_ENTERED")
     except Exception as e:
         raise Exception(f"Failed in safe_update_sheet: {str(e)}")
 
@@ -180,7 +192,6 @@ if uploaded_safety_file:
                 try:
                     ws_master = sh.worksheet("Safety_Stock_Criteria")
                 except gspread.exceptions.WorksheetNotFound:
-                    # 🛠️ ซ่อมบั๊กใหญ่: บังคับใช้ค่า Integer (1000) ไม่ใช้ String ป้องกัน API Google งง
                     ws_master = sh.add_worksheet(title="Safety_Stock_Criteria", rows=2000, cols=30)
                 
                 ws_master.clear()
