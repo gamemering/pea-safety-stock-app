@@ -397,7 +397,7 @@ if df_safety is not None:
         "(เช่น สมาชิกอ่านไม่ทัน หรือต้องการแจ้งย้ำ)"
     )
 
-    if st.sidebar.button("🔄 สั่งส่งผลสรุปเข้า LINE อีกครั้ง", key="resend_summary_to_line"):
+    if st.sidebar.button("🔄 ส่งผลสรุปเข้า LINE อีกครั้ง", key="resend_summary_to_line"):
         with st.spinner(f"กำลังดึงข้อมูลและส่งไลน์คลัง {warehouse_option}..."):
             client = get_gspread_client()
             if client is not None:
