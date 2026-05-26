@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import os
 import re
 from google.oauth2.service_account import Credentials
 import gspread
@@ -255,7 +256,6 @@ if df_safety is not None:
     st.sidebar.markdown("---")
     st.sidebar.header("⚙️ เลือกคลังที่ต้องการตรวจสอบ")
     
-    # 🎯 ตัวควบคุมหลักจุดเดี่ยวประจำหน้าเว็บ
     warehouse_option = st.sidebar.selectbox(
         "เลือกพื้นที่คลังพัสดุเพื่อดูตาราง:",
         options=warehouse_options,
@@ -265,7 +265,6 @@ if df_safety is not None:
     st.sidebar.markdown("---")
     st.sidebar.subheader("📥 อัปเดตยอดคลัง MB52 เข้าคลาวด์")
 
-    # 🎯 ยุบรวมช่องอัปโหลดไฟล์ MB52 ให้ผูกติดและแสดงชื่อตามคลังที่เลือกด้านบนโดยตรง ไม่ต้องสับสนเลือกซ้ำอีกต่อไป
     uploaded_mb52 = st.sidebar.file_uploader(
         f"ลากวางไฟล์ MB52.txt ของคลัง [{warehouse_option}] ที่นี่",
         key=f"uploader_{warehouse_option}"
@@ -334,7 +333,7 @@ if df_safety is not None:
                         st.sidebar.success(f"📊 อัปเดตแผ่นงานสรุป **{summary_ws_title}** เรียบร้อย!")
                         st.cache_data.clear()
 
-                        # 3. 🎯 ส่ง LINE แจ้งเตือนอัตโนมัติ (เจาะจงเจาะลึกเฉพาะหน้าชีตสรุปคลังตัวนี้ด้วย #gid)
+                        # 3. ส่ง LINE แจ้งเตือนอัตโนมัติ
                         if "line_group_id" in st.secrets and not df_shortage_auto.empty:
                             total_shortage = len(df_shortage_auto)
                             line_msg = (
@@ -358,7 +357,6 @@ if df_safety is not None:
                                     line_msg += f"🔺 และอีก {total_shortage - 15} รายการ ตรวจสอบเพิ่มเติมบนระบบเว็บ\n"
                                     break
                             
-                            # 🔗 เจาะจงลิงก์ปลายทางตรงดิ่งเข้าหน้าชีตสรุปประจำคลังทันทีเมื่อผู้บริหารเปิดอ่าน
                             summary_sheet_url = f"{sh.url}#gid={summary_worksheet.id}"
                             line_msg += f"\n🟢 ผู้บริหารสามารถเปิดดูตารางสรุปของคลังนี้บน Google Sheets ได้ทันทีที่ลิงก์นี้ครับ:\n{summary_sheet_url}"
                             
@@ -403,7 +401,6 @@ if df_safety is not None:
                         df_merge_resend['const_diff'] = df_merge_resend['Qty_0021'] - df_merge_resend[warehouse_option]
                         df_shortage_resend = df_merge_resend[df_merge_resend['const_diff'] < 0]
 
-                        # 🎯 ดึง ID ของแผ่นงานสรุปเป้าหมายมาล็อกลิงก์ปุ่มกดส่งซ้ำ
                         summary_ws_title = f"สรุป_{warehouse_option}"
                         try:
                             target_sum_ws = sh.worksheet(summary_ws_title)
@@ -490,6 +487,14 @@ if df_safety is not None:
         df_result['อนุมัติ safety stock'] = df_merge[warehouse_option].astype(int)
         df_result['คงเหลือ (ผลต่าง 0021)'] = df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] - df_merge[warehouse_option].astype(int)
 
+        # 🎯 4. คำนวณเปอร์เซ็นต์ (ยอดคงเหลือ 0021 เทียบกับ safety stock) ล็อกทศนิยม 2 ตำแหน่ง
+        q_series = df_merge['Qty_0021'].fillna(0).astype(float)
+        s_series = df_safety[warehouse_option].fillna(0).astype(float)
+        df_result['คิดเป็นเปอร์เซ็น'] = [
+            (q / s * 100) if s > 0 else (100.0 if q > 0 else 0.0)
+            for q, s in zip(q_series, s_series)
+        ]
+
         def alert_low_stock(val):
             return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if val < 0 else ''
 
@@ -497,7 +502,8 @@ if df_safety is not None:
             'จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)': '{:,}',
             'จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)': '{:,}',
             'อนุมัติ safety stock': '{:,}',
-            'คงเหลือ (ผลต่าง 0021)': '{:,}'
+            'คงเหลือ (ผลต่าง 0021)': '{:,}',
+            'คิดเป็นเปอร์เซ็น': '{:,.2f}%'  # 🎯 แสดงผลทศนิยม 2 ตำแหน่งพร้อมเครื่องหมาย %
         }
 
         styled_df = df_result.style.map(alert_low_stock, subset=['คงเหลือ (ผลต่าง 0021)']).format(format_dict)
@@ -511,7 +517,7 @@ if df_safety is not None:
             st.success(f"✅ พัสดุทั้งหมดในคลังย่อย 0021 ของคลัง **{warehouse_option}** อยู่ในระดับที่ปลอดภัยครบถ้วน")
 
     else:
-        st.info(f"📊 ยังไม่มีฐานข้อมูลถาวรของคลัง **{warehouse_option}** ใน Google Sheets (กรุณาลากวางไฟล์ MB52 เพื่อตั้งต้นข้อมูล)")
+        st.info(f"📊 ยังไม่มีฐานข้อมูลถาวรของคลัง **{warehouse_option}** ใน Google Sheets (กรุณาเลือกคลังด้านซ้ายและอัปโหลดไฟล์ MB52 เพื่อตั้งต้นข้อมูล)")
 
         df_blank = pd.DataFrame({
             'ลำดับ': df_safety['No'],
