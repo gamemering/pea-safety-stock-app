@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import os
 import re
 from google.oauth2.service_account import Credentials
 import gspread
@@ -255,7 +256,6 @@ if df_safety is not None:
     st.sidebar.markdown("---")
     st.sidebar.header("⚙️ เลือกคลังที่ต้องการตรวจสอบ")
     
-    # 🎯 ตัวควบคุมหลักจุดเดียว
     warehouse_option = st.sidebar.selectbox(
         "เลือกพื้นที่คลังพัสดุเพื่อดูตาราง:",
         options=warehouse_options,
@@ -265,7 +265,6 @@ if df_safety is not None:
     st.sidebar.markdown("---")
     st.sidebar.subheader("📥 อัปเดตยอดคลัง MB52 เข้าคลาวด์")
 
-    # 🎯 ผูกเป้าหมายและชื่อปุ่มเข้ากับ warehouse_option ที่เลือกโดยตรง (ตัดกล่องเลือกซ้ำออกแล้ว)
     uploaded_mb52 = st.sidebar.file_uploader(
         f"ลากวางไฟล์ MB52.txt ของคลัง [{warehouse_option}] ที่นี่",
         key=f"uploader_{warehouse_option}"
@@ -334,7 +333,7 @@ if df_safety is not None:
                         st.sidebar.success(f"📊 อัปเดตแผ่นงานสรุป **{summary_ws_title}** เรียบร้อย!")
                         st.cache_data.clear()
 
-                        # 3. ส่ง LINE แจ้งเตือนอัตโนมัติ
+                        # 3. 🎯 ส่ง LINE แจ้งเตือนอัตโนมัติ (ปรับให้เด้งเข้าชีตสรุปตรงๆ ด้วยการแนบ #gid)
                         if "line_group_id" in st.secrets and not df_shortage_auto.empty:
                             total_shortage = len(df_shortage_auto)
                             line_msg = (
@@ -357,7 +356,11 @@ if df_safety is not None:
                                 if idx >= 15:
                                     line_msg += f"🔺 และอีก {total_shortage - 15} รายการ ตรวจสอบเพิ่มเติมบนระบบเว็บ\n"
                                     break
-                            line_msg += f"\n🟢 ดูตารางสรุปทั้งหมด: {sh.url}"
+                            
+                            # 🔗 ล็อกพิกัด URL ให้เจาะจงเฉพาะชีตสรุปคลังตัวนี้โดยตรง
+                            summary_sheet_url = f"{sh.url}#gid={summary_worksheet.id}"
+                            line_msg += f"\n🟢 ผู้บริหารสามารถเปิดดูตารางสรุปของคลังนี้บน Google Sheets ได้ทันทีที่ลิงก์นี้ครับ:\n{summary_sheet_url}"
+                            
                             status_code = send_line_message(line_msg, st.secrets["line_group_id"])
                             if status_code == 200:
                                 st.sidebar.success("📱 ส่งรายงานเข้ากลุ่ม LINE สำเร็จ!")
@@ -399,6 +402,14 @@ if df_safety is not None:
                         df_merge_resend['คงเหลือ_0021'] = df_merge_resend['Qty_0021'] - df_merge_resend[warehouse_option]
                         df_shortage_resend = df_merge_resend[df_merge_resend['คงเหลือ_0021'] < 0]
 
+                        # 🎯 ดึง ID ของหน้าชีตสรุปมาเตรียมล็อกลิงก์ปุ่มกดส่งซ้ำ
+                        summary_ws_title = f"สรุป_{warehouse_option}"
+                        try:
+                            target_sum_ws = sh.worksheet(summary_ws_title)
+                            summary_sheet_url = f"{sh.url}#gid={target_sum_ws.id}"
+                        except:
+                            summary_sheet_url = sh.url
+
                         if "line_group_id" in st.secrets:
                             if not df_shortage_resend.empty:
                                 total = len(df_shortage_resend)
@@ -418,13 +429,13 @@ if df_safety is not None:
                                     if idx >= 15:
                                         line_msg += f"🔺 และอีก {total - 15} รายการ\n"
                                         break
-                                line_msg += f"\n🟢 Google Sheets: {sh.url}"
+                                line_msg += f"\n🟢 Google Sheets ชีตสรุปคลัง:\n{summary_sheet_url}"
                             else:
                                 line_msg = (
                                     f"✅ [ส่งซ้ำ: รายงานสถานะคลัง]\n"
                                     f"📊 คลัง: {warehouse_option}\n"
                                     f"👍 พัสดุทั้งหมดอยู่ในระดับปลอดภัย\n"
-                                    f"🟢 Google Sheets: {sh.url}"
+                                    f"🟢 Google Sheets ชีตสรุปคลัง:\n{summary_sheet_url}"
                                 )
 
                             status_code = send_line_message(line_msg, st.secrets["line_group_id"])
@@ -473,7 +484,7 @@ if df_safety is not None:
             'ลำดับ': df_merge['No'] if 'No' in df_merge.columns else range(1, len(df_merge) + 1),
             'รหัสพัสดุ': df_merge['SAP_Code'],
             'ชื่อพัสดุ': df_merge['Description'],
-            'จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)': df_merge['Actual_Qty'].round(0).astype(int),
+            'จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)': df_merge['Actual_Qty'].round(0).astype(int)
             'จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)': df_merge['Qty_0021'].round(0).astype(int),
             'อนุมัติ safety stock': df_merge[warehouse_option].astype(int),
             'คงเหลือ (ผลต่าง 0021)': (df_merge['Qty_0021'].round(0).astype(int) - df_merge[warehouse_option].astype(int))
