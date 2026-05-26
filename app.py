@@ -60,7 +60,6 @@ def send_line_message(message_text, target_id):
 # --- 🛠️ ฟังก์ชันสำหรับแกะเนื้อหาไฟล์เกณฑ์ Safety Stock จริง (เวอร์ชันสแกนอัจฉริยะ ล็อกเป้า 10 หลัก) ---
 def parse_safety_stock_csv(file_content):
     try:
-        # อ่านไฟล์แบบปล่อยให้ pandas คำนวณขนาดคอลัมน์อัตโนมัติจากไฟล์จริง
         raw_df = pd.read_csv(io.StringIO(file_content), header=None, dtype=str).fillna('')
         
         sap_col_idx = -1
@@ -70,10 +69,8 @@ def parse_safety_stock_csv(file_content):
         for idx, row in raw_df.iterrows():
             for col_idx, val in enumerate(row):
                 val_str = str(val).strip()
-                # ค้นหาพิกัดรหัสคลังเก็บพัสดุ เช่น C010, C130
                 if re.match(r'^C\d{3}$', val_str):
                     wh_col_map[val_str] = col_idx
-                # ค้นหาพิกัดคอลัมน์รหัสพัสดุ โดยอิงจากเลขรหัส SAP 10 หลักของ PEA
                 if sap_col_idx == -1 and re.match(r'^\d{10}$', val_str):
                     sap_col_idx = col_idx
         
@@ -88,16 +85,14 @@ def parse_safety_stock_csv(file_content):
         for idx, row in raw_df.iterrows():
             sap_code = str(row[sap_col_idx]).strip()
             
-            # 🔥 กรองเอาเฉพาะแถวที่เป็นตัวเลขรหัสพัสดุ 10 หลักเท่านั้น (ตัดหัวข้อภาษาไทยและแถวสรุปยอดทิ้งเกลี้ยง)
             if re.match(r'^\d{10}$', sap_code):
                 row_data = {
-                    'No': counter,  # เจนลำดับเป็นตัวเลขคลีน ๆ ป้องกัน Google Sheets ปฏิเสธข้อมูล
+                    'No': counter,  
                     'SAP_Code': sap_code,
                     'Description': str(row[sap_col_idx + 1]).strip() if (sap_col_idx + 1) < len(row) else '',
                     'Unit': str(row[sap_col_idx + 2]).strip() if (sap_col_idx + 2) < len(row) else ''
                 }
                 
-                # ดึงข้อมูลจำนวนโควตาของแต่ละคลัง
                 for wh_code, col_id in wh_col_map.items():
                     qty_str = str(row[col_id]).replace(',', '').strip()
                     try:
@@ -113,7 +108,6 @@ def parse_safety_stock_csv(file_content):
             
         processed_df = pd.DataFrame(parsed_rows)
         
-        # จัดระเบียบลำดับคอลัมน์ให้เรียบร้อยสวยงาม
         sorted_wh_cols = sorted(list(wh_col_map.keys()))
         final_cols = ['No', 'SAP_Code', 'Description', 'Unit'] + sorted_wh_cols
         processed_df = processed_df[final_cols]
@@ -211,11 +205,14 @@ if uploaded_safety_file is not None:
                         ws_master = sh.add_worksheet(title="Safety_Stock_Criteria", rows="2000", cols="20")
                     
                     ws_master.clear()
-                    
-                    # เคลียร์ค่า NaN ทั้งหมดให้สะอาดก่อนส่งข้อมูลขึ้นไปบันทึก
                     df_safety_parsed = df_safety_parsed.fillna('')
-                    
                     master_data_save = [df_safety_parsed.columns.tolist()] + df_safety_parsed.values.tolist()
+                    
+                    # 🛠️ [จุดซ่อมเสริมแกร่ง 1]: สั่งขยายขนาดตารางอัตโนมัติก่อนเขียนข้อมูล ป้องกัน Out of bounds ล้มเหลว
+                    req_rows = len(master_data_save)
+                    req_cols = len(master_data_save[0]) if req_rows > 0 else 1
+                    ws_master.resize(rows=max(ws_master.row_count, req_rows), cols=max(ws_master.col_count, req_cols))
+                    
                     ws_master.update('A1', master_data_save)
                     
                     st.sidebar.success("✅ บันทึกเกณฑ์อ้างอิง Safety Stock ลงระบบคลาวด์ถาวรสำเร็จแล้ว!")
@@ -232,7 +229,6 @@ if df_safety is not None and not df_safety.empty:
     st.sidebar.markdown("---")
     st.sidebar.header("⚙️ 2. เลือกคลังที่ต้องการตรวจสอบ")
     
-    # ดึงรายชื่อคลังอัตโนมัติเฉพาะคอลัมน์ที่ขึ้นต้นด้วยตัว C เท่านั้น
     warehouse_options = [col for col in df_safety.columns if str(col).startswith('C') and str(col)[1:].isdigit()]
     
     warehouse_option = st.sidebar.selectbox(
@@ -278,6 +274,12 @@ if df_safety is not None and not df_safety.empty:
                         
                         worksheet.clear()
                         data_to_save = [df_parsed.columns.tolist()] + df_parsed.values.tolist()
+                        
+                        # 🛠️ [จุดซ่อมเสริมแกร่ง 2]: สั่งขยายขนาดตารางคลังดิบอัตโนมัติ
+                        req_rows_raw = len(data_to_save)
+                        req_cols_raw = len(data_to_save[0]) if req_rows_raw > 0 else 1
+                        worksheet.resize(rows=max(worksheet.row_count, req_rows_raw), cols=max(worksheet.col_count, req_cols_raw))
+                        
                         worksheet.update('A1', data_to_save)
                         st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
                         
@@ -300,6 +302,7 @@ if df_safety is not None and not df_safety.empty:
                             summary_worksheet = sh.add_worksheet(title=summary_ws_title, rows="500", cols="5")
                         
                         summary_worksheet.clear()
+                        
                         if not df_shortage_auto.empty:
                             df_summary_sheet = pd.DataFrame()
                             df_summary_sheet['รหัสพัสดุ'] = df_shortage_auto['SAP_Code']
@@ -307,12 +310,16 @@ if df_safety is not None and not df_safety.empty:
                             df_summary_sheet['ยอดคงคลังย่อย 0021'] = df_shortage_auto['Qty_0021'].astype(int)
                             df_summary_sheet['เกณฑ์ Safety Stock'] = df_shortage_auto[upload_target].astype(int)
                             df_summary_sheet['จำนวนที่ขาด (ผลต่าง)'] = (df_shortage_auto[upload_target] - df_shortage_auto['Qty_0021']).astype(int)
-                            
                             summary_data_to_save = [df_summary_sheet.columns.tolist()] + df_summary_sheet.values.tolist()
-                            summary_worksheet.update('A1', summary_data_to_save)
                         else:
-                            summary_worksheet.update('A1', [["สถานะคลัง", "✅ ปลอดภัยครบถ้วน ไม่มีพัสดุต่ำกว่าเกณฑ์"]])
+                            summary_data_to_save = [["สถานะคลัง", "✅ ปลอดภัยครบถ้วน ไม่มีพัสดุต่ำกว่าเกณฑ์"]]
                         
+                        # 🛠️ [จุดซ่อมเสริมแกร่ง 3]: สั่งขยายขนาดตารางชีตสรุปอัตโนมัติ
+                        req_rows_sum = len(summary_data_to_save)
+                        req_cols_sum = len(summary_data_to_save[0]) if req_rows_sum > 0 else 1
+                        summary_worksheet.resize(rows=max(summary_worksheet.row_count, req_rows_sum), cols=max(summary_worksheet.col_count, req_cols_sum))
+                        
+                        summary_worksheet.update('A1', summary_data_to_save)
                         st.sidebar.success(f"📊 อัปเดตแผ่นงานสรุป **{summary_ws_title}** แยกต่างหากเรียบร้อย!")
                         st.cache_data.clear() 
                         
@@ -442,7 +449,6 @@ if df_safety is not None and not df_safety.empty:
         except Exception:
             df_mb52_clean = None
 
-    # แปลงข้อมูลฝั่งเกณฑ์ให้อิงตามประเภทตัวเลข
     df_safety[warehouse_option] = pd.to_numeric(df_safety[warehouse_option], errors='coerce').fillna(0).astype(int)
 
     if df_mb52_clean is not None and not df_mb52_clean.empty:
