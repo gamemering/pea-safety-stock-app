@@ -57,7 +57,7 @@ def send_line_message(message_text, target_id):
     except Exception as e:
         return str(e)
 
-# --- 🛠️ ฟังก์ชันสำหรับแกะเนื้อหาไฟล์เกณฑ์ Safety Stock จริง (แกะฟอร์แมตซ้อนหัวแถว) ---
+# --- 🛠️ ฟังก์ชันสำหรับแกะเนื้อหาไฟล์เกณฑ์ Safety Stock จริง (เวอร์ชันอัปเกรดป้องกันค่าว่างล่ม) ---
 def parse_safety_stock_csv(file_content):
     try:
         raw_df = pd.read_csv(io.StringIO(file_content), header=None)
@@ -87,7 +87,7 @@ def parse_safety_stock_csv(file_content):
                 cols.append('Unit')
             elif 'ที่' in lbl and i == 0:
                 cols.append('No')
-            elif code.startswith('C') and code[1:].isdigit():  # ดึงเฉพาะรหัสคลัง เช่น C010, C130
+            elif code.startswith('C') and code[1:].isdigit():  # ดึงรหัสคลัง เช่น C010, C130
                 cols.append(code)
             else:
                 cols.append(f"Unused_{i}")
@@ -103,7 +103,7 @@ def parse_safety_stock_csv(file_content):
         data_df['SAP_Code'] = data_df['SAP_Code'].astype(str).str.replace('.0', '', regex=False).str.strip()
         data_df = data_df[data_df['SAP_Code'] != '']
         
-        # ปรับค่า NaN ในทุกคลังให้เป็น 0 เพื่อป้องกันระบบคำนวณพัง
+        # ปรับค่าทุกคลังให้เป็นตัวเลขอัจฉริยะ ป้องกันข้อความว่างเปล่าทำระบบพัง
         for col in warehouse_cols:
             data_df[col] = pd.to_numeric(data_df[col], errors='coerce').fillna(0).astype(int)
             
@@ -177,7 +177,7 @@ if client is not None:
 # สร้างเมนูด้านซ้าย (Sidebar)
 st.sidebar.title("📁 แผงควบคุมฐานข้อมูล")
 
-# --- 🆕 ส่วนอัปโหลดไฟล์เกณฑ์อ้างอิง Safety Stock ใหม่ประจำปี ---
+# --- ส่วนอัปโหลดไฟล์เกณฑ์อ้างอิง Safety Stock ใหม่ประจำปี ---
 st.sidebar.header("📤 1. อัปเดตเกณฑ์ Safety Stock ประจำปี")
 uploaded_safety_file = st.sidebar.file_uploader("ลากวางไฟล์เกณฑ์จริง (.csv) ที่นี่", key="uploader_master_safety")
 
@@ -200,6 +200,10 @@ if uploaded_safety_file is not None:
                         ws_master = sh.add_worksheet(title="Safety_Stock_Criteria", rows="2000", cols="20")
                     
                     ws_master.clear()
+                    
+                    # 🛠️ ซ่อมจุดบั๊กวิกฤต: เคลียร์ NaN ทั้งหมดให้เป็นค่าคลีนก่อนส่งขึ้น Google Sheets ป้องกันระบบ JSON หลังบ้านพัง
+                    df_safety_parsed = df_safety_parsed.fillna('')
+                    
                     master_data_save = [df_safety_parsed.columns.tolist()] + df_safety_parsed.values.tolist()
                     ws_master.update('A1', master_data_save)
                     
@@ -213,7 +217,7 @@ if uploaded_safety_file is not None:
 
 
 # เช็คความพร้อมของเกณฑ์อ้างอิงก่อนเริ่มทำงานส่วนที่เหลือ
-if df_safety is not None:
+if df_safety is not None and not df_safety.empty:
     st.sidebar.markdown("---")
     st.sidebar.header("⚙️ 2. เลือกคลังที่ต้องการตรวจสอบ")
     
@@ -398,10 +402,14 @@ if df_safety is not None:
                                 else:
                                     st.sidebar.error(f"❌ ส่งไลน์ไม่สำเร็จ Code: {status_code}")
                             else:
-                                line_msg = f"✅ [ส่งซ้ำ: รายงานสถานะคลังพัสดุ]\n📊 พื้นที่คลังพัสดุ: {warehouse_option}\n👍 สถานะปกติ: พัสดุทั้งหมดในคลังย่อย 0021 อยู่ในระดับที่ปลอดภัยครบถ้วน\n\n🔗 ลิงก์ Google Sheets:\n{sh.url}"
+                                line_msg = f"✅ [ส่งซ้ำ: รายงานสถานะคลังพัสดุ]\n📊 พื้นที่คลังพัสดุ: {warehouse_option}\n👍 Status ปกติ: พัสดุทั้งหมดในคลังย่อย 0021 อยู่ในระดับที่ปลอดภัยครบถ้วน\n\n🔗 ลิงก์ Google Sheets:\n{sh.url}"
                                 status_code = send_line_message(line_msg, st.secrets["line_group_id"])
                                 if status_code == 200:
                                     st.sidebar.success(f"📱 ส่งสถานะปกติของคลัง **{warehouse_option}** เข้ากลุ่ม LINE สำเร็จ!")
+                        else:
+                            st.sidebar.error("❌ ไม่พบรหัส line_group_id ในระบบความลับหลังบ้าน")
+                    else:
+                        st.sidebar.warning(f"⚠️ คลัง **{warehouse_option}** ยังไม่มีฐานข้อมูลในระบบเลยส่งซ้ำไม่ได้ (กรุณาลากวางไฟล์ MB52 เพื่อตั้งต้นข้อมูก่อน)")
                 except Exception as e:
                     st.sidebar.error(f"❌ ระบบเกิดข้อผิดพลาดในการดึงข้อมูลส่งไลน์: {e}")
 
@@ -423,7 +431,8 @@ if df_safety is not None:
         except Exception:
             df_mb52_clean = None
 
-    df_safety[warehouse_option] = df_safety[warehouse_option].fillna(0)
+    # 🛠️ ซ่อมจุดบั๊ก: ป้องกันค่าว่างข้อความทำระบบคำนวณหน้าเว็บล่ม
+    df_safety[warehouse_option] = pd.to_numeric(df_safety[warehouse_option], errors='coerce').fillna(0).astype(int)
 
     if df_mb52_clean is not None and not df_mb52_clean.empty:
         df_safety['SAP_Code'] = df_safety['SAP_Code'].astype(str).str.strip()
@@ -439,8 +448,10 @@ if df_safety is not None:
         df_result['ชื่อพัสดุ'] = df_merge['Description']
         df_result['จำนวนอุปกรณ์ในคลัง (รวมทุก SLoc)'] = df_merge['Actual_Qty'].round(0).astype(int)
         df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] = df_merge['Qty_0021'].round(0).astype(int)
-        df_result['อนุมัติ safety stock'] = df_merge[warehouse_option].astype(int)
-        df_result['คงเหลือ (ผลต่าง 0021)'] = df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] - df_merge[warehouse_option].astype(int)
+        
+        # 🛠️ ป้องกันการพังเวลาเรียกใช้งานตาราง
+        df_result['อนุมัติ safety stock'] = pd.to_numeric(df_merge[warehouse_option], errors='coerce').fillna(0).astype(int)
+        df_result['คงเหลือ (ผลต่าง 0021)'] = df_result['จำนวนอุปกรณ์ในคลัง (เฉพาะ 0021)'] - df_result['อนุมัติ safety stock']
 
         def alert_low_stock(val):
             return 'background-color: #ffcccc; color: #cc0000; font-weight: bold;' if val < 0 else ''
@@ -470,7 +481,7 @@ if df_safety is not None:
         df_blank['รหัสพัสดุ'] = df_safety['SAP_Code']
         df_blank['ชื่อพัสดุ'] = df_safety['Description']
         df_blank['หน่วยนับ'] = df_safety['Unit']
-        df_blank['อนุมัติ safety stock'] = df_safety[warehouse_option].fillna(0).astype(int)
+        df_blank['อนุมัติ safety stock'] = pd.to_numeric(df_safety[warehouse_option], errors='coerce').fillna(0).astype(int)
         st.dataframe(df_blank.style.format({'อนุมัติ safety stock': '{:,}'}), use_container_width=True, hide_index=True)
 
 else:
