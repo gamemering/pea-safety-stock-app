@@ -9,7 +9,7 @@ import json
 
 st.set_page_config(layout="wide", page_title="ระบบติดตาม Safety Stock คลังพัสดุ")
 
-st.title("📦 ระบบแจ้งเตือนและติดตามเกณฑ์พัสดุสำรอง (Safety Stock)")
+st.title("📦 ระบบแจ้งเตือนและติดตามเกณฑ์พัสดุสำรอง (Safety Stock) งบผู้ใช้ไฟ")
 st.subheader("เปรียบเทียบเกณฑ์อนุมัติประจำปี 2569 กับ ยอดคงคลังปัจจุบัน (MB52)")
 
 # 🔥 ชื่อ Google Sheets หลัก
