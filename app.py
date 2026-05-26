@@ -28,7 +28,7 @@ def get_gspread_client():
         client = gspread.authorize(creds)
         return client
     except Exception as e:
-        st.error(f"❌ ระบบความปลอดภัยปฏิเสชการเชื่อมต่อ (Secrets Error): {e}")
+        st.error(f"❌ ระบบความปลอดภัยปฏิเสธการเชื่อมต่อ (Secrets Error): {e}")
         return None
 
 # --- 📱 ฟังก์ชันสำหรับส่งข้อความผ่าน LINE Messaging API ---
@@ -57,62 +57,68 @@ def send_line_message(message_text, target_id):
     except Exception as e:
         return str(e)
 
-# --- 🛠️ ฟังก์ชันสำหรับแกะเนื้อหาไฟล์เกณฑ์ Safety Stock จริง (เวอร์ชันแกนเหล็ก ป้องกันคอมมาเหลื่อมล้ำ) ---
+# --- 🛠️ ฟังก์ชันสำหรับแกะเนื้อหาไฟล์เกณฑ์ Safety Stock จริง (เวอร์ชันสแกนอัจฉริยะ ล็อกเป้า 10 หลัก) ---
 def parse_safety_stock_csv(file_content):
     try:
-        # 🛡️ หมัดเด็ดป้องกันพัง: บังคับให้ Pandas จองพื้นที่ตารางไว้ 100 คอลัมน์เท่ากันทุกแถว ป้องกันปัญหาช่องยาวไม่เท่ากันจาก Excel
-        raw_df = pd.read_csv(io.StringIO(file_content), header=None, names=list(range(100)), dtype=str)
-        raw_df = raw_df.fillna('')
+        # อ่านไฟล์แบบปล่อยให้ pandas คำนวณขนาดคอลัมน์อัตโนมัติจากไฟล์จริง
+        raw_df = pd.read_csv(io.StringIO(file_content), header=None, dtype=str).fillna('')
         
-        header_row_idx = -1
-        # ค้นหาแถวที่มีคำว่า 'รหัสพัสดุ' เพื่อตั้งต้นเป็นแถวหัวข้อคลัง
+        sap_col_idx = -1
+        wh_col_map = {}
+        
+        # 1. วิ่งสำรวจพิกัดคอลัมน์อัจฉริยะทั่วทั้งแผ่นงาน
         for idx, row in raw_df.iterrows():
-            if any('รหัสพัสดุ' in str(val) for val in row):
-                header_row_idx = idx
-                break
+            for col_idx, val in enumerate(row):
+                val_str = str(val).strip()
+                # ค้นหาพิกัดรหัสคลังเก็บพัสดุ เช่น C010, C130
+                if re.match(r'^C\d{3}$', val_str):
+                    wh_col_map[val_str] = col_idx
+                # ค้นหาพิกัดคอลัมน์รหัสพัสดุ โดยอิงจากเลขรหัส SAP 10 หลักของ PEA
+                if sap_col_idx == -1 and re.match(r'^\d{10}$', val_str):
+                    sap_col_idx = col_idx
         
-        if header_row_idx == -1:
-            st.error("❌ รูปแบบไฟล์ไม่ถูกต้อง: ไม่พบแถวที่มีคำว่า 'รหัสพัสดุ' กรุณาตรวจสอบไฟล์อ้างอิง")
+        if sap_col_idx == -1 or not wh_col_map:
+            st.error("❌ โครงสร้างไฟล์ไม่ถูกต้อง: ไม่พบคอลัมน์รหัสพัสดุ 10 หลัก หรือรหัสคลัง (C010-C130)")
             return None
             
-        row_labels = raw_df.iloc[header_row_idx].tolist()
-        row_codes = raw_df.iloc[header_row_idx + 1].tolist()
+        # 2. ดึงข้อมูลเฉพาะแถวที่มีรหัสพัสดุจริงสิงอยู่เท่านั้น
+        parsed_rows = []
+        counter = 1
         
-        cols = []
-        for i in range(len(row_labels)):
-            lbl = str(row_labels[i]).strip()
-            code = str(row_codes[i]).strip()
-            if 'รหัสพัสดุ' in lbl:
-                cols.append('SAP_Code')
-            elif 'รายการ' in lbl:
-                cols.append('Description')
-            elif 'หน่วย' in lbl:
-                cols.append('Unit')
-            elif 'ที่' in lbl and i == 0:
-                cols.append('No')
-            elif code.startswith('C') and code[1:].isdigit():  # ตะครุบรหัสคลัง เช่น C010, C130
-                cols.append(code)
-            else:
-                cols.append(f"Unused_{i}")
-                
-        raw_df.columns = cols
-        data_df = raw_df.iloc[header_row_idx + 2:].copy()
-        
-        warehouse_cols = [c for c in cols if c.startswith('C') and c[1:].isdigit()]
-        valid_cols = ['No', 'SAP_Code', 'Description', 'Unit'] + warehouse_cols
-        data_df = data_df[[c for c in valid_cols if c in data_df.columns]]
-        
-        # คลีนข้อมูลรหัสพัสดุและเอา .0 ออก (ถ้าติดมา)
-        data_df['SAP_Code'] = data_df['SAP_Code'].astype(str).str.replace('.0', '', regex=False).str.strip()
-        
-        # 🎯 กรองเอาเฉพาะแถวที่เป็นรหัสพัสดุตัวเลขล้วน (ตัดแถวหัวข้อกลุ่มคอนกรีต/แถวว่างทิ้งอัตโนมัติ)
-        data_df = data_df[data_df['SAP_Code'].str.match(r'^\d+$', na=False)]
-        
-        # ปรับค่าของทุกคลังให้เป็นตัวเลขจำนวนเต็มคลีน ๆ
-        for col in warehouse_cols:
-            data_df[col] = pd.to_numeric(data_df[col], errors='coerce').fillna(0).astype(int)
+        for idx, row in raw_df.iterrows():
+            sap_code = str(row[sap_col_idx]).strip()
             
-        return data_df
+            # 🔥 กรองเอาเฉพาะแถวที่เป็นตัวเลขรหัสพัสดุ 10 หลักเท่านั้น (ตัดหัวข้อภาษาไทยและแถวสรุปยอดทิ้งเกลี้ยง)
+            if re.match(r'^\d{10}$', sap_code):
+                row_data = {
+                    'No': counter,  # เจนลำดับเป็นตัวเลขคลีน ๆ ป้องกัน Google Sheets ปฏิเสธข้อมูล
+                    'SAP_Code': sap_code,
+                    'Description': str(row[sap_col_idx + 1]).strip() if (sap_col_idx + 1) < len(row) else '',
+                    'Unit': str(row[sap_col_idx + 2]).strip() if (sap_col_idx + 2) < len(row) else ''
+                }
+                
+                # ดึงข้อมูลจำนวนโควตาของแต่ละคลัง
+                for wh_code, col_id in wh_col_map.items():
+                    qty_str = str(row[col_id]).replace(',', '').strip()
+                    try:
+                        row_data[wh_code] = int(float(qty_str)) if qty_str else 0
+                    except ValueError:
+                        row_data[wh_code] = 0
+                        
+                parsed_rows.append(row_data)
+                counter += 1
+                
+        if not parsed_rows:
+            return None
+            
+        processed_df = pd.DataFrame(parsed_rows)
+        
+        # จัดระเบียบลำดับคอลัมน์ให้เรียบร้อยสวยงาม
+        sorted_wh_cols = sorted(list(wh_col_map.keys()))
+        final_cols = ['No', 'SAP_Code', 'Description', 'Unit'] + sorted_wh_cols
+        processed_df = processed_df[final_cols]
+        
+        return processed_df
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาดในการประมวลผลไฟล์เกณฑ์พัสดุ: {e}")
         return None
@@ -206,7 +212,7 @@ if uploaded_safety_file is not None:
                     
                     ws_master.clear()
                     
-                    # คลีนข้อมูล NaN ทั้งหมดให้เป็นค่าว่างธรรมดาก่อนยิงขึ้น Google Sheets
+                    # เคลียร์ค่า NaN ทั้งหมดให้สะอาดก่อนส่งข้อมูลขึ้นไปบันทึก
                     df_safety_parsed = df_safety_parsed.fillna('')
                     
                     master_data_save = [df_safety_parsed.columns.tolist()] + df_safety_parsed.values.tolist()
@@ -436,7 +442,7 @@ if df_safety is not None and not df_safety.empty:
         except Exception:
             df_mb52_clean = None
 
-    # แปลงข้อมูลฝั่งเกณฑ์ให้พร้อมคำนวณ
+    # แปลงข้อมูลฝั่งเกณฑ์ให้อิงตามประเภทตัวเลข
     df_safety[warehouse_option] = pd.to_numeric(df_safety[warehouse_option], errors='coerce').fillna(0).astype(int)
 
     if df_mb52_clean is not None and not df_mb52_clean.empty:
