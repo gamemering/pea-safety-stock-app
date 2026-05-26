@@ -4,8 +4,8 @@ import os
 import re
 from google.oauth2.service_account import Credentials
 import gspread
-import requests  # ➕ เพิ่มสำหรับระบบส่ง LINE
-import json      # ➕ เพิ่มสำหรับระบบส่ง LINE
+import requests  # ใช้สำหรับระบบส่ง LINE
+import json      # ใช้สำหรับระบบส่ง LINE
 
 st.set_page_config(layout="wide", page_title="ระบบติดตาม Safety Stock คลังพัสดุ")
 
@@ -30,7 +30,7 @@ def get_gspread_client():
         st.error(f"❌ ระบบความปลอดภัยปฏิเสธการเชื่อมต่อ (Secrets Error): {e}")
         return None
 
-# --- 📱 ฟังก์ชันสำหรับส่งข้อความผ่าน LINE Messaging API (เพิ่มสำหรับปุ่มทดสอบ) ---
+# --- 📱 ฟังก์ชันสำหรับส่งข้อความผ่าน LINE Messaging API ---
 def send_line_message(message_text, target_id):
     try:
         url = "https://api.line.me/v2/bot/message/push"
@@ -95,7 +95,6 @@ def parse_mb52_txt(file_content):
         if not line:
             continue
             
-        # 🛠️ ซ่อมแซมตรงนี้จุดเดียว: ปอกเครื่องหมาย | ที่หัวแถวออกเพื่อให้โครงสร้างข้อมูลแมตช์กับ Regex และ Token เดิมของคุณ
         if line.startswith('|'):
             line = line[1:].strip()
             
@@ -157,7 +156,7 @@ if df_safety is not None:
         key=f"uploader_{upload_target}"
     )
 
-    # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร
+    # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร + บันทึก Sheet สรุป + 📱 แจ้งเตือน LINE พร้อมแนบลิงก์ไฟล์
     if uploaded_mb52 is not None:
         try:
             raw_bytes = uploaded_mb52.getvalue()
@@ -174,6 +173,7 @@ if df_safety is not None:
                     if client is not None:
                         sh = client.open(GOOGLE_SHEET_NAME)
                         
+                        # 1. บันทึกข้อมูลฐานข้อมูลดิบ (c010-c130)
                         try:
                             worksheet = sh.worksheet(upload_target)
                         except gspread.exceptions.WorksheetNotFound:
@@ -182,21 +182,86 @@ if df_safety is not None:
                         worksheet.clear()
                         data_to_save = [df_parsed.columns.tolist()] + df_parsed.values.tolist()
                         worksheet.update('A1', data_to_save)
-                        
                         st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
+                        
+                        # 2. สกัดข้อมูลวิกฤตไปบันทึกเป็นแผ่นงานสรุปดูง่ายแยกอีกหนึ่ง Sheet ต่างหาก 
+                        df_safety_line = df_safety.copy()
+                        df_parsed_line = df_parsed.copy()
+                        df_safety_line['SAP_Code'] = df_safety_line['SAP_Code'].astype(str).str.strip()
+                        df_parsed_line['SAP_Code'] = df_parsed_line['SAP_Code'].astype(str).str.strip()
+                        
+                        df_merge_auto = pd.merge(df_safety_line, df_parsed_line, on='SAP_Code', how='left')
+                        df_merge_auto['Qty_0021'] = pd.to_numeric(df_merge_auto['Qty_0021'], errors='coerce').fillna(0)
+                        df_merge_auto[upload_target] = pd.to_numeric(df_merge_auto[upload_target], errors='coerce').fillna(0)
+                        df_merge_auto['คงเหลือ_0021'] = df_merge_auto['Qty_0021'] - df_merge_auto[upload_target]
+                        df_shortage_auto = df_merge_auto[df_merge_auto['คงเหลือ_0021'] < 0]
+                        
+                        summary_ws_title = f"สรุป_{upload_target}"
+                        try:
+                            summary_worksheet = sh.worksheet(summary_ws_title)
+                        except gspread.exceptions.WorksheetNotFound:
+                            summary_worksheet = sh.add_worksheet(title=summary_ws_title, rows="500", cols="5")
+                        
+                        summary_worksheet.clear()
+                        if not df_shortage_auto.empty:
+                            df_summary_sheet = pd.DataFrame()
+                            df_summary_sheet['รหัสพัสดุ'] = df_shortage_auto['SAP_Code']
+                            df_summary_sheet['ชื่อพัสดุ'] = df_shortage_auto['Description']
+                            df_summary_sheet['ยอดคงคลังย่อย 0021'] = df_shortage_auto['Qty_0021'].astype(int)
+                            df_summary_sheet['เกณฑ์ Safety Stock'] = df_shortage_auto[upload_target].astype(int)
+                            df_summary_sheet['จำนวนที่ขาด (ผลต่าง)'] = (df_shortage_auto[upload_target] - df_shortage_auto['Qty_0021']).astype(int)
+                            
+                            summary_data_to_save = [df_summary_sheet.columns.tolist()] + df_summary_sheet.values.tolist()
+                            summary_worksheet.update('A1', summary_data_to_save)
+                        else:
+                            summary_worksheet.update('A1', [["สถานะคลัง", "✅ ปลอดภัยครบถ้วน ไม่มีพัสดุต่ำกว่าเกณฑ์"]])
+                        
+                        st.sidebar.success(f"📊 อัปเดตแผ่นงานสรุป **{summary_ws_title}** แยกต่างหากเรียบร้อย!")
                         st.cache_data.clear() 
+                        
+                        # 3. ➕ ส่ง LINE แจ้งเตือนอัตโนมัติ + แนบลิงก์ Google Sheets เข้าไปท้ายข้อความ
+                        if "line_group_id" in st.secrets:
+                            if not df_shortage_auto.empty:
+                                total_shortage = len(df_shortage_auto)
+                                line_msg = f"🚨 [รายงานแจ้งเตือนพัสดุต่ำกว่าเกณฑ์ Safety Stock]\n📊 พื้นที่คลังพัสดุ: {upload_target}\n⚠️ ตรวจพบรายการวิกฤตทั้งหมด: {total_shortage} รายการ\n\n📌 รายการพัสดุวิกฤตและยอดผลต่างที่ขาดคลัง:\n"
+                                
+                                for idx, row in enumerate(df_shortage_auto.iterrows(), 1):
+                                    data = row[1]
+                                    current_0021 = int(data['Qty_0021'])
+                                    limit_stock = int(data[upload_target])
+                                    needed_qty = limit_stock - current_0021
+                                    
+                                    line_msg += f"{idx}. รหัส: {data['SAP_Code']}\n"
+                                    line_msg += f"   {data['Description']}\n"
+                                    line_msg += f"   ยอดคลังย่อย: {current_0021} | เกณฑ์อนุมัติ: {limit_stock}\n"
+                                    line_msg += f"   ❌ ผลต่าง (ขาดอีก): {needed_qty}\n"
+                                    line_msg += "----------------------------------\n"
+                                    
+                                    if idx >= 15:
+                                        line_msg += f"🔺 และยังมีรายการอื่น ๆ ที่ต่ำกว่าเกณฑ์อีก {total_shortage - 15} รายการ ตรวจสอบเพิ่มเติมได้บนระบบหน้าเว็บครับ\n"
+                                        break
+                                
+                                # 🔗 ดึงลิงก์ Google Sheets ของโปรเจกต์มาแปะต่อท้ายข้อความไลน์
+                                google_sheet_url = sh.url
+                                line_msg += f"\n🟢 ผู้บริหารสามารถเปิดดูตารางสรุปฐานข้อมูลทั้งหมดบน Google Sheets ได้ที่ลิงก์ด้านล่างนี้เลยครับ:\n{google_sheet_url}"
+                                        
+                                status_code = send_line_message(line_msg, st.secrets["line_group_id"])
+                                if status_code == 200:
+                                    st.sidebar.success("📱 ออโต้ไลน์ส่งสรุปรายงานพร้อมลิงก์เข้ากลุ่มสำเร็จ!")
+                                else:
+                                    st.sidebar.warning(f"⚠️ ไลน์อัตโนมัติไม่ส่ง (Code: {status_code})")
             else:
                 st.sidebar.warning("⚠️ ไม่พบข้อมูลพัสดุในไฟล์ที่อัปโหลด")
         except Exception as e:
             st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูลลงแผ่นงาน: {e}")
 
-    # --- 🧪 ปุ่มกดทดสอบยิง LINE ด้วยตนเอง (ฝังจุดนี้จุดเดียวตามคำสั่ง) ---
+    # --- 🧪 ปุ่มกดทดสอบยิง LINE ด้วยตนเอง ---
     st.sidebar.markdown("---")
     st.sidebar.subheader("🧪 เครื่องมือทดสอบระบบ LINE")
     if st.sidebar.button("⚡ ยิงข้อความทดสอบเข้า LINE ทันที"):
         if "line_group_id" in st.secrets:
             target = st.secrets["line_group_id"]
-            status_code = send_line_message("🎯 สัญญาณชีพปกติ! ระบบแจ้งเตือน Safety Stock เชื่อมต่อกับ LINE กลุ่มสำเร็จแล้วครับ", target)
+            status_code = send_line_message("🎯 สัญญาณชีพปกติ! ระบบแจ้งเตือน Safety Stock เชื่อมต่อกับ LINE สำเร็จแล้วครับ", target)
             if status_code == 200:
                 st.sidebar.success("✅ LINE เด้งแล้ว! รหัสกลุ่มและ Token ถูกต้อง 100%")
             else:
