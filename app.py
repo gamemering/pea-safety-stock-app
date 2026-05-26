@@ -15,7 +15,7 @@ st.subheader("เปรียบเทียบเกณฑ์อนุมัต
 
 GOOGLE_SHEET_NAME = "pea_safety_stock_db"
 
-# --- 🛡️ ฟังก์ชันเกราะป้องกันการแปลงตัวเลข (สยบ Error 100%) ---
+# --- 🛡️ ฟังก์ชันเกราะป้องกันการแปลงตัวเลข ---
 def to_int_safe(val):
     try:
         if pd.isna(val): 
@@ -35,12 +35,29 @@ def get_gspread_client():
         st.code(traceback.format_exc(), language='python')
         return None
 
-# --- 1.1 ฟังก์ชันอัปเดต Google Sheets รองรับทุกเวอร์ชัน ---
+# --- 🛠️ 1.1 ฟังก์ชันอัปเดต Google Sheets แบบดิบ (RAW) สยบ Error ---
 def safe_update_sheet(sheet, data, range_name="A1"):
+    # ทำความสะอาดข้อมูลทุกเซลล์ให้เป็น Python Type บริสุทธิ์
+    clean_data = []
+    for row in data:
+        clean_row = []
+        for val in row:
+            if pd.isna(val):
+                clean_row.append("")
+            elif isinstance(val, (int, float)):
+                if val == float('inf') or val == float('-inf'):
+                    clean_row.append("")
+                else:
+                    clean_row.append(int(val) if float(val).is_integer() else float(val))
+            else:
+                clean_row.append(str(val))
+        clean_data.append(clean_row)
+        
     try:
-        sheet.update(values=data, range_name=range_name)
+        # บังคับ RAW ป้องกัน Google Sheets เอาเครื่องหมาย - หรือ = ไปแปลเป็นสูตรจนพัง
+        sheet.update(values=clean_data, range_name=range_name, value_input_option="RAW")
     except TypeError:
-        sheet.update(range_name, data)
+        sheet.update(range_name, clean_data, value_input_option="RAW")
 
 # --- 2. ฟังก์ชันส่ง LINE ---
 def send_line_message(message_text, target_id):
@@ -109,7 +126,6 @@ def load_safety_stock_from_sheets(client):
         records = worksheet.get_all_records()
         if records:
             df = pd.DataFrame(records)
-            # คลีนข้อมูลทันที: เลือกรักษารหัสพัสดุเฉพาะแถวที่เป็นตัวเลขเท่านั้น (ปัดเป่าซากหัวตารางเก่าทิ้ง)
             df['SAP_Code'] = df['SAP_Code'].astype(str).str.strip()
             df = df[df['SAP_Code'].str.match(r'^\d+$')]
             return df
@@ -169,6 +185,7 @@ if uploaded_safety_file:
                 ws_master.resize(rows=max(ws_master.row_count, len(master_data_save)), cols=max(ws_master.col_count, len(master_data_save[0])))
                 
                 safe_update_sheet(ws_master, master_data_save)
+                
                 st.sidebar.success("✅ บันทึกเกณฑ์อ้างอิง Safety Stock ลงระบบคลาวด์ถาวรสำเร็จแล้ว!")
                 st.cache_data.clear()
                 st.rerun()
@@ -319,7 +336,6 @@ if df_safety is not None and not df_safety.empty:
         
         df_merge = pd.merge(df_safety, df_mb52_clean, on='SAP_Code', how='left')
         
-        # 🛡️ ใช้เกราะป้องกันแปลงข้อมูลเพื่อสยบ Error 100%
         df_result = pd.DataFrame({
             'ลำดับ': df_merge['No'],
             'รหัสพัสดุ': df_merge['SAP_Code'],
