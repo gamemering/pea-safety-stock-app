@@ -156,7 +156,7 @@ if df_safety is not None:
         key=f"uploader_{upload_target}"
     )
 
-    # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร + บันทึก Sheet สรุป + 📱 แจ้งเตือน LINE พร้อมแนบลิงก์ไฟล์
+    # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร + บันทึก Sheet สรุป + แจ้งเตือน LINE อัตโนมัติ
     if uploaded_mb52 is not None:
         try:
             raw_bytes = uploaded_mb52.getvalue()
@@ -219,7 +219,7 @@ if df_safety is not None:
                         st.sidebar.success(f"📊 อัปเดตแผ่นงานสรุป **{summary_ws_title}** แยกต่างหากเรียบร้อย!")
                         st.cache_data.clear() 
                         
-                        # 3. ➕ ส่ง LINE แจ้งเตือนอัตโนมัติ + แนบลิงก์ Google Sheets เข้าไปท้ายข้อความ
+                        # 3. ส่ง LINE แจ้งเตือนอัตโนมัติ + แนบลิงก์ Google Sheets เข้าไปท้ายข้อความ
                         if "line_group_id" in st.secrets:
                             if not df_shortage_auto.empty:
                                 total_shortage = len(df_shortage_auto)
@@ -241,7 +241,6 @@ if df_safety is not None:
                                         line_msg += f"🔺 และยังมีรายการอื่น ๆ ที่ต่ำกว่าเกณฑ์อีก {total_shortage - 15} รายการ ตรวจสอบเพิ่มเติมได้บนระบบหน้าเว็บครับ\n"
                                         break
                                 
-                                # 🔗 ดึงลิงก์ Google Sheets ของโปรเจกต์มาแปะต่อท้ายข้อความไลน์
                                 google_sheet_url = sh.url
                                 line_msg += f"\n🟢 ผู้บริหารสามารถเปิดดูตารางสรุปฐานข้อมูลทั้งหมดบน Google Sheets ได้ที่ลิงก์ด้านล่างนี้เลยครับ:\n{google_sheet_url}"
                                         
@@ -255,19 +254,79 @@ if df_safety is not None:
         except Exception as e:
             st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูลลงแผ่นงาน: {e}")
 
-    # --- 🧪 ปุ่มกดทดสอบยิง LINE ด้วยตนเอง ---
+    # --- 🔄 ปุ่มส่งผลสรุปอีกครั้ง พร้อมคำอธิบายสำหรับพนักงาน (แทนที่เครื่องมือทดสอบเดิม) ---
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🧪 เครื่องมือทดสอบระบบ LINE")
-    if st.sidebar.button("⚡ ยิงข้อความทดสอบเข้า LINE ทันที"):
-        if "line_group_id" in st.secrets:
-            target = st.secrets["line_group_id"]
-            status_code = send_line_message("🎯 สัญญาณชีพปกติ! ระบบแจ้งเตือน Safety Stock เชื่อมต่อกับ LINE สำเร็จแล้วครับ", target)
-            if status_code == 200:
-                st.sidebar.success("✅ LINE เด้งแล้ว! รหัสกลุ่มและ Token ถูกต้อง 100%")
-            else:
-                st.sidebar.error(f"❌ LINE ไม่เด้ง! รหัสตอบกลับคือ Code: {status_code}")
-        else:
-            st.sidebar.error("❌ ไม่พบรหัส line_group_id ในหน้าต่าง Secrets หลังบ้าน")
+    st.sidebar.subheader("📢 ส่งรายงานสรุปซ้ำเข้า LINE")
+    st.sidebar.info(
+        "💡 **คำอธิบายระบบสำหรับพนักงาน:**\n\n"
+        "เมื่อมีการลากวางไฟล์เพื่ออัปเดตยอดคงเหลือด้านบน ระบบจะคำนวณและส่งข้อความแจ้งเตือนเข้า LINE กลุ่มผู้บริหารให้โดยอัตโนมัติทันทีอยู่แล้ว\n\n"
+        "🚨 **แต่ในกรณีที่ต้องการส่งข้อมูลผลสรุปของคลังพัสดุที่เลือกอยู่ ณ ปัจจุบัน เข้ากลุ่ม LINE อีกครั้ง** (เช่น สมาชิกกลุ่มไลน์อ่านไม่ทัน หรือต้องการแจ้งย้ำ) "
+        "สามารถกดปุ่มด้านล่างนี้เพื่อสั่งส่งซ้ำได้ทันทีครับ"
+    )
+    
+    if st.sidebar.button("🔄 สั่งส่งผลสรุปเข้า LINE อีกครั้ง", key="resend_summary_to_line"):
+        with st.spinner(f"กำลังดึงข้อมูลล่าสุดและเตรียมส่งไลน์คลัง {warehouse_option}..."):
+            client = get_gspread_client()
+            if client is not None:
+                try:
+                    sh = client.open(GOOGLE_SHEET_NAME)
+                    worksheet = sh.worksheet(warehouse_option)
+                    records = worksheet.get_all_records()
+                    
+                    if records:
+                        df_mb52_clean_resend = pd.DataFrame(records)
+                        df_safety_resend = df_safety.copy()
+                        
+                        df_safety_resend['SAP_Code'] = df_safety_resend['SAP_Code'].astype(str).str.strip()
+                        df_mb52_clean_resend['SAP_Code'] = df_mb52_clean_resend['SAP_Code'].astype(str).str.strip()
+                        
+                        df_merge_resend = pd.merge(df_safety_resend, df_mb52_clean_resend, on='SAP_Code', how='left')
+                        df_merge_resend['Qty_0021'] = pd.to_numeric(df_merge_resend['Qty_0021'], errors='coerce').fillna(0)
+                        df_merge_resend[warehouse_option] = pd.to_numeric(df_merge_resend[warehouse_option], errors='coerce').fillna(0)
+                        df_merge_resend['คงเหลือ_0021'] = df_merge_resend['Qty_0021'] - df_merge_resend[warehouse_option]
+                        
+                        df_shortage_resend = df_merge_resend[df_merge_resend['คงเหลือ_0021'] < 0]
+                        
+                        if "line_group_id" in st.secrets:
+                            if not df_shortage_resend.empty:
+                                total_shortage = len(df_shortage_resend)
+                                line_msg = f"🚨 [ส่งซ้ำ: รายงานแจ้งเตือนพัสดุต่ำกว่าเกณฑ์ Safety Stock]\n📊 พื้นที่คลังพัสดุ: {warehouse_option}\n⚠️ ตรวจพบรายการวิกฤตทั้งหมด: {total_shortage} รายการ\n\n📌 รายการพัสดุวิกฤตและยอดผลต่างที่ขาดคลัง:\n"
+                                
+                                for idx, row in enumerate(df_shortage_resend.iterrows(), 1):
+                                    data = row[1]
+                                    current_0021 = int(data['Qty_0021'])
+                                    limit_stock = int(data[warehouse_option])
+                                    needed_qty = limit_stock - current_0021
+                                    
+                                    line_msg += f"{idx}. รหัส: {data['SAP_Code']}\n"
+                                    line_msg += f"   {data['Description']}\n"
+                                    line_msg += f"   ยอดคลังย่อย: {current_0021} | เกณฑ์อนุมัติ: {limit_stock}\n"
+                                    line_msg += f"   ❌ ผลต่าง (ขาดอีก): {needed_qty}\n"
+                                    line_msg += "----------------------------------\n"
+                                    
+                                    if idx >= 15:
+                                        line_msg += f"🔺 และยังมีรายการอื่น ๆ ที่ต่ำกว่าเกณฑ์อีก {total_shortage - 15} รายการ ตรวจสอบเพิ่มเติมได้บนระบบหน้าเว็บครับ\n"
+                                        break
+                                
+                                google_sheet_url = sh.url
+                                line_msg += f"\n🟢 ผู้บริหารสามารถเปิดดูตารางสรุปฐานข้อมูลทั้งหมดบน Google Sheets ได้ที่ลิงก์ด้านล่างนี้เลยครับ:\n{google_sheet_url}"
+                                
+                                status_code = send_line_message(line_msg, st.secrets["line_group_id"])
+                                if status_code == 200:
+                                    st.sidebar.success(f"📱 ส่งรายงานคลัง **{warehouse_option}** ซ้ำเข้ากลุ่ม LINE สำเร็จ!")
+                                else:
+                                    st.sidebar.error(f"❌ ส่งไลน์ไม่สำเร็จ Code: {status_code}")
+                            else:
+                                line_msg = f"✅ [ส่งซ้ำ: รายงานสถานะคลังพัสดุ]\n📊 พื้นที่คลังพัสดุ: {warehouse_option}\n👍 สถานะปกติ: พัสดุทั้งหมดในคลังย่อย 0021 อยู่ในระดับที่ปลอดภัยครบถ้วน\n\n🔗 ลิงก์ Google Sheets:\n{sh.url}"
+                                status_code = send_line_message(line_msg, st.secrets["line_group_id"])
+                                if status_code == 200:
+                                    st.sidebar.success(f"📱 ส่งสถานะปกติของคลัง **{warehouse_option}** เข้ากลุ่ม LINE สำเร็จ!")
+                        else:
+                            st.sidebar.error("❌ ไม่พบรหัส line_group_id ในระบบความลับหลังบ้าน")
+                    else:
+                        st.sidebar.warning(f"⚠️ คลัง **{warehouse_option}** ยังไม่มีฐานข้อมูลในระบบเลยส่งซ้ำไม่ได้ (กรุณาลากวางไฟล์ MB52 เพื่อตั้งต้นข้อมูก่อน)")
+                except Exception as e:
+                    st.sidebar.error(f"❌ ระบบเกิดข้อผิดพลาดในการดึงข้อมูลส่งไลน์: {e}")
 
 
     # --- ส่วนที่ 4: การดึงดาต้าจาก Google Sheets มาคำนวณโชว์ผล ---
