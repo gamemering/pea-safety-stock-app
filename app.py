@@ -35,43 +35,47 @@ def get_gspread_client():
         st.code(traceback.format_exc(), language='python')
         return None
 
-# --- 🛠️ 1.1 ฟังก์ชันอัปเดต Google Sheets แบบดักจับอักขระอันตราย ---
+# --- 🛠️ 1.1 ฟังก์ชันอัปเดต Google Sheets แบบเช็คเวอร์ชันตรงๆ ไม่อ้อมค้อม ---
 def safe_update_sheet(sheet, df, range_name="A1"):
+    # 1. แปลง DataFrame เป็น String และล้างค่าแปลกปลอม
+    df_str = df.astype(str).replace(['nan', 'NaN', 'None', '<NA>', 'inf', '-inf'], '')
+    raw_data = [df_str.columns.tolist()] + df_str.values.tolist()
+    
+    # 2. 🛡️ สแกนดักจับอักขระอันตราย (=, +, -) ที่ทำให้ Sheets คิดว่าเป็นสูตร
+    clean_data = []
+    for row in raw_data:
+        clean_row = []
+        for val in row:
+            val_str = str(val).strip()
+            # ถ้าข้อความขึ้นต้นด้วย = ให้เติม ' นำหน้าตามที่ Google Sheets แนะนำเป๊ะๆ
+            if val_str.startswith(('=', '+', '-')):
+                clean_row.append(f"'{val_str}")
+            else:
+                clean_row.append(val_str)
+        clean_data.append(clean_row)
+        
+    # 3. เช็คขนาดตารางและขยายล่วงหน้า (ป้องกัน Error ตารางเต็ม)
+    req_rows = len(clean_data)
+    req_cols = len(clean_data[0]) if req_rows > 0 else 1
+    
+    cur_rows = int(sheet.row_count) if sheet.row_count else 1000
+    cur_cols = int(sheet.col_count) if sheet.col_count else 20
+    
+    if req_rows > cur_rows or req_cols > cur_cols:
+        sheet.resize(rows=max(cur_rows, req_rows + 100), cols=max(cur_cols, req_cols + 10))
+    
+    # 4. ตรวจสอบเวอร์ชันของไลบรารี gspread แล้วสั่งเขียนข้อมูลให้ถูกลำดับ
     try:
-        # 1. แปลง DataFrame เป็น String และล้างค่าแปลกปลอม
-        df_str = df.astype(str).replace(['nan', 'NaN', 'None', '<NA>', 'inf', '-inf'], '')
-        raw_data = [df_str.columns.tolist()] + df_str.values.tolist()
+        v = int(gspread.__version__.split('.')[0])
+    except Exception:
+        v = 5
         
-        # 2. 🛡️ สแกนดักจับอักขระอันตราย (=, +, -) ที่ทำให้ Sheets คิดว่าเป็นสูตร
-        clean_data = []
-        for row in raw_data:
-            clean_row = []
-            for val in row:
-                val_str = str(val).strip()
-                # ถ้าข้อความขึ้นต้นด้วย = ให้เติม ' นำหน้าตามที่ Google Sheets แนะนำเป๊ะๆ
-                if val_str.startswith(('=', '+', '-')):
-                    clean_row.append(f"'{val_str}")
-                else:
-                    clean_row.append(val_str)
-            clean_data.append(clean_row)
-            
-        # 3. เช็คขนาดตารางและขยายล่วงหน้า (ป้องกัน Error ตารางเต็ม)
-        req_rows = len(clean_data)
-        req_cols = len(clean_data[0]) if req_rows > 0 else 1
-        
-        cur_rows = int(sheet.row_count) if sheet.row_count else 1000
-        cur_cols = int(sheet.col_count) if sheet.col_count else 20
-        
-        if req_rows > cur_rows or req_cols > cur_cols:
-            sheet.resize(rows=max(cur_rows, req_rows + 100), cols=max(cur_cols, req_cols + 10))
-        
-        # 4. อัปเดตข้อมูลแบบ USER_ENTERED
-        try:
-            sheet.update(values=clean_data, range_name=range_name, value_input_option="USER_ENTERED")
-        except TypeError:
-            sheet.update(range_name, clean_data, value_input_option="USER_ENTERED")
-    except Exception as e:
-        raise Exception(f"Failed in safe_update_sheet: {str(e)}")
+    if v >= 6:
+        # เวอร์ชันใหม่: ใส่ข้อมูล (Data) ก่อน แล้วตามด้วยชื่อเซลล์ (Range)
+        sheet.update(clean_data, range_name, value_input_option="USER_ENTERED")
+    else:
+        # เวอร์ชันเก่า: ใส่ชื่อเซลล์ (Range) ก่อน แล้วตามด้วยข้อมูล (Data)
+        sheet.update(range_name, clean_data, value_input_option="USER_ENTERED")
 
 # --- 2. ฟังก์ชันส่ง LINE ---
 def send_line_message(message_text, target_id):
@@ -196,7 +200,7 @@ if uploaded_safety_file:
                 
                 ws_master.clear()
                 
-                # 🛡️ โยน DataFrame เข้าฟังก์ชันเกราะไทเทเนียมให้จัดการรวบยอด
+                # 🛡️ โยน DataFrame เข้าฟังก์ชันเกราะที่แก้ไขใหม่
                 safe_update_sheet(ws_master, df_safety_parsed)
                 
                 st.sidebar.success("✅ บันทึกเกณฑ์อ้างอิง Safety Stock ลงระบบคลาวด์ถาวรสำเร็จแล้ว!")
