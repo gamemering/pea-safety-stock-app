@@ -136,6 +136,7 @@ if df_safety is not None:
     all_columns = df_safety.columns.tolist()
     warehouse_options = [col for col in all_columns if col not in ['No', 'Type', 'SAP_Code', 'Description', 'Unit', 'Total_N3']]
     
+    # 🎯 กล่องเลือกคลังจุดเดียวที่เป็นทั้งตัวดูตารางและตัวระบุเป้าหมายการบันทึก
     warehouse_option = st.sidebar.selectbox(
         "เลือกพื้นที่คลังพัสดุเพื่อดูตาราง:",
         options=warehouse_options,
@@ -145,15 +146,10 @@ if df_safety is not None:
     st.sidebar.markdown("---")
     st.sidebar.subheader("📥 อัปเดตยอดคลังเข้าคลาวด์ถาวร")
     
-    upload_target = st.sidebar.selectbox(
-        "เลือกคลังปลายทางที่จะบันทึกไฟล์นี้:",
-        options=warehouse_options,
-        key="upload_target_select"
-    )
-    
+    # 🎯 ช่องอัปโหลดไฟล์ MB52 ผูกเข้ากับคลังที่เลือกด้านบนโดยตรง ไม่ต้องเลือกซ้ำ
     uploaded_mb52 = st.sidebar.file_uploader(
-        f"ลากวางไฟล์ MB52.txt ของคลัง [{upload_target}] ที่นี่", 
-        key=f"uploader_{upload_target}"
+        f"ลากวางไฟล์ MB52.txt ของคลัง [{warehouse_option}] ที่นี่", 
+        key=f"uploader_{warehouse_option}"
     )
 
     # 💾 ตรรกะการบันทึกข้อมูลลง Google Sheets ถาวร + บันทึก Sheet สรุป + แจ้งเตือน LINE อัตโนมัติ
@@ -168,21 +164,21 @@ if df_safety is not None:
             df_parsed = parse_mb52_txt(string_data)
             
             if not df_parsed.empty:
-                with st.spinner(f"กำลังอัปเดตฐานข้อมูลถาวรของคลัง {upload_target} ลง Google Sheets..."):
+                with st.spinner(f"กำลังอัปเดตฐานข้อมูลถาวรของคลัง {warehouse_option} ลง Google Sheets..."):
                     client = get_gspread_client()
                     if client is not None:
                         sh = client.open(GOOGLE_SHEET_NAME)
                         
-                        # 1. บันทึกข้อมูลฐานข้อมูลดิบ (c010-c130)
+                        # 1. บันทึกข้อมูลฐานข้อมูลดิบตามคลังที่เลือกอยู่
                         try:
-                            worksheet = sh.worksheet(upload_target)
+                            worksheet = sh.worksheet(warehouse_option)
                         except gspread.exceptions.WorksheetNotFound:
-                            worksheet = sh.add_worksheet(title=upload_target, rows="1000", cols="5")
+                            worksheet = sh.add_worksheet(title=warehouse_option, rows="1000", cols="5")
                         
                         worksheet.clear()
                         data_to_save = [df_parsed.columns.tolist()] + df_parsed.values.tolist()
                         worksheet.update('A1', data_to_save)
-                        st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{upload_target}** ลง Google Sheets สำเร็จ!")
+                        st.sidebar.success(f"🚀 บันทึกข้อมูลคลัง **{warehouse_option}** ลง Google Sheets สำเร็จ!")
                         
                         # 2. สกัดข้อมูลวิกฤตไปบันทึกเป็นแผ่นงานสรุปดูง่ายแยกอีกหนึ่ง Sheet ต่างหาก 
                         df_safety_line = df_safety.copy()
@@ -192,11 +188,11 @@ if df_safety is not None:
                         
                         df_merge_auto = pd.merge(df_safety_line, df_parsed_line, on='SAP_Code', how='left')
                         df_merge_auto['Qty_0021'] = pd.to_numeric(df_merge_auto['Qty_0021'], errors='coerce').fillna(0)
-                        df_merge_auto[upload_target] = pd.to_numeric(df_merge_auto[upload_target], errors='coerce').fillna(0)
-                        df_merge_auto['คงเหลือ_0021'] = df_merge_auto['Qty_0021'] - df_merge_auto[upload_target]
+                        df_merge_auto[warehouse_option] = pd.to_numeric(df_merge_auto[warehouse_option], errors='coerce').fillna(0)
+                        df_merge_auto['คงเหลือ_0021'] = df_merge_auto['Qty_0021'] - df_merge_auto[warehouse_option]
                         df_shortage_auto = df_merge_auto[df_merge_auto['คงเหลือ_0021'] < 0]
                         
-                        summary_ws_title = f"สรุป_{upload_target}"
+                        summary_ws_title = f"สรุป_{warehouse_option}"
                         try:
                             summary_worksheet = sh.worksheet(summary_ws_title)
                         except gspread.exceptions.WorksheetNotFound:
@@ -208,8 +204,8 @@ if df_safety is not None:
                             df_summary_sheet['รหัสพัสดุ'] = df_shortage_auto['SAP_Code']
                             df_summary_sheet['ชื่อพัสดุ'] = df_shortage_auto['Description']
                             df_summary_sheet['ยอดคงคลังย่อย 0021'] = df_shortage_auto['Qty_0021'].astype(int)
-                            df_summary_sheet['เกณฑ์ Safety Stock'] = df_shortage_auto[upload_target].astype(int)
-                            df_summary_sheet['จำนวนที่ขาด (ผลต่าง)'] = (df_shortage_auto[upload_target] - df_shortage_auto['Qty_0021']).astype(int)
+                            df_summary_sheet['เกณฑ์ Safety Stock'] = df_shortage_auto[warehouse_option].astype(int)
+                            df_summary_sheet['จำนวนที่ขาด (ผลต่าง)'] = (df_shortage_auto[warehouse_option] - df_shortage_auto['Qty_0021']).astype(int)
                             
                             summary_data_to_save = [df_summary_sheet.columns.tolist()] + df_summary_sheet.values.tolist()
                             summary_worksheet.update('A1', summary_data_to_save)
@@ -223,12 +219,12 @@ if df_safety is not None:
                         if "line_group_id" in st.secrets:
                             if not df_shortage_auto.empty:
                                 total_shortage = len(df_shortage_auto)
-                                line_msg = f"🚨 [รายงานแจ้งเตือนพัสดุต่ำกว่าเกณฑ์ Safety Stock]\n📊 พื้นที่คลังพัสดุ: {upload_target}\n⚠️ ตรวจพบรายการวิกฤตทั้งหมด: {total_shortage} รายการ\n\n📌 รายการพัสดุวิกฤตและยอดผลต่างที่ขาดคลัง:\n"
+                                line_msg = f"🚨 [รายงานแจ้งเตือนพัสดุต่ำกว่าเกณฑ์ Safety Stock]\n📊 พื้นที่คลังพัสดุ: {warehouse_option}\n⚠️ ตรวจพบรายการวิกฤตทั้งหมด: {total_shortage} รายการ\n\n📌 รายการพัสดุวิกฤตและยอดผลต่างที่ขาดคลัง:\n"
                                 
                                 for idx, row in enumerate(df_shortage_auto.iterrows(), 1):
                                     data = row[1]
                                     current_0021 = int(data['Qty_0021'])
-                                    limit_stock = int(data[upload_target])
+                                    limit_stock = int(data[warehouse_option])
                                     needed_qty = limit_stock - current_0021
                                     
                                     line_msg += f"{idx}. รหัส: {data['SAP_Code']}\n"
@@ -254,7 +250,7 @@ if df_safety is not None:
         except Exception as e:
             st.sidebar.error(f"❌ เกิดข้อผิดพลาดในการบันทึกข้อมูลลงแผ่นงาน: {e}")
 
-    # --- 🔄 ปุ่มส่งผลสรุปอีกครั้ง พร้อมคำอธิบายสำหรับพนักงาน (แทนที่เครื่องมือทดสอบเดิม) ---
+    # --- 🔄 ปุ่มส่งผลสรุปอีกครั้ง พร้อมคำอธิบายสำหรับพนักงาน ---
     st.sidebar.markdown("---")
     st.sidebar.subheader("📢 ส่งรายงานสรุปซ้ำเข้า LINE")
     st.sidebar.info(
@@ -388,7 +384,7 @@ if df_safety is not None:
             st.success(f"✅ พัสดุทั้งหมดในคลังย่อย 0021 ของคลัง **{warehouse_option}** อยู่ในระดับที่ปลอดภัยครบถ้วน")
             
     else:
-        st.info(f"📊 ยังไม่มีฐานข้อมูลถาวรของคลัง **{warehouse_option}** ใน Google Sheets (กรุณาเลือกคลังปลายทางด้านซ้ายและอัปโหลดไฟล์ MB52 เพื่อตั้งต้นข้อมูล)")
+        st.info(f"📊 ยังไม่มีฐานข้อมูลถาวรของคลัง **{warehouse_option}** ใน Google Sheets (กรุณาลากวางไฟล์ MB52 เพื่อตั้งต้นข้อมูล)")
         
         df_blank = pd.DataFrame()
         df_blank['ลำดับ'] = df_safety['No']
